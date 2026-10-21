@@ -1,0 +1,17 @@
+DATABASE_URL=postgres://maitri:maitri@localhost:5432/maitri_lsp
+JWT_SECRET=change-this-to-something-long-and-random
+PORT=4000
+# Set to true when DATABASE_URL points at a hosted Postgres (Neon, Render,
+# etc.) that requires SSL. Leave unset/false for the local docker-compose
+# Postgres.
+DB_SSL=false
+
+# Optional: Cloudflare R2 for persistent file uploads (photos/PDFs survive
+# restarts and redeploys). Leave all four blank to use local disk instead
+# (fine for local dev, not persistent on a host like Render). See the
+# README's "Persistent file uploads" section for how to get these values.
+R2_ACCOUNT_ID=
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=
+R2_BUCKET_NAME=
+R2_PUBLIC_URL_BASE=
