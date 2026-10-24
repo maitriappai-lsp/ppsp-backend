@@ -1,7 +1,7 @@
 {
-  "name": "maitri-lsp-backend",
+  "name": "maitri-ppsp-backend",
   "version": "1.0.0",
-  "description": "Node.js/Express + PostgreSQL backend for the Maitri LSP app",
+  "description": "Node.js/Express + PostgreSQL backend for the Maitri PPSP app",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
