@@ -147,9 +147,8 @@ ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_url TEXT;
 
 CREATE TABLE IF NOT EXISTS content (
   id            TEXT PRIMARY KEY,
-  title         TEXT NOT NULL,
-  category_id   TEXT REFERENCES categories(id) ON DELETE SET NULL,
-  file_type     TEXT,   -- PDF / PPT / Document / Excel / Audio / Video / Image / Other
+  title         TEXT,   -- legacy; PPSP shows file_name instead
+  file_type     TEXT,   -- Video / Document / PDF / PPT / Excel / Audio / Image / Other
   uploaded_by   TEXT REFERENCES resources(id) ON DELETE SET NULL,
   date          DATE NOT NULL,
   storage_path  TEXT
@@ -411,15 +410,35 @@ CREATE TABLE IF NOT EXISTS dsr_detail_students (
 -- ---------------------------------------------------------------------------
 
 -- The checklist. Rows like '1', '2' ... are section headings; rows like
--- '1.01' are the questions. category_no is TEXT on purpose: as a number,
--- 2.10 would collapse to 2.1 and sort wrongly.
+-- '1.01' are the questions. The id IS the category number, and is TEXT on
+-- purpose: as a number, 2.10 would collapse to 2.1 and sort wrongly.
+-- sort_order is derived from the number (2.13 -> 2013, heading 3 -> 3000) so
+-- a new question slots into place without renumbering anything.
 CREATE TABLE IF NOT EXISTS audit_category_master (
-  category_no  TEXT PRIMARY KEY,
+  id           TEXT PRIMARY KEY,
   description  TEXT NOT NULL,
   is_heading   BOOLEAN NOT NULL DEFAULT FALSE,
   sort_order   INTEGER NOT NULL,
   active       BOOLEAN NOT NULL DEFAULT TRUE
 );
+
+-- Databases created from the first version of this file call the key column
+-- category_no. Rename it once so the generic routes can use it; the foreign
+-- key from audit_detail follows the rename. A no-op on a fresh database.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'audit_category_master' AND column_name = 'category_no') THEN
+    ALTER TABLE audit_category_master RENAME COLUMN category_no TO id;
+  END IF;
+END $$;
+
+-- Keep sort_order in step with the number (safe to re-run).
+UPDATE audit_category_master
+   SET sort_order = split_part(id, '.', 1)::int * 1000 + COALESCE(NULLIF(split_part(id, '.', 2), '')::int, 0)
+ WHERE id ~ '^[0-9]+(\.[0-9]+)?$'
+   AND sort_order IS DISTINCT FROM
+       (split_part(id, '.', 1)::int * 1000 + COALESCE(NULLIF(split_part(id, '.', 2), '')::int, 0));
 
 CREATE TABLE IF NOT EXISTS audit_header (
   id               TEXT PRIMARY KEY,                     -- Audit ID
@@ -469,7 +488,7 @@ CREATE INDEX IF NOT EXISTS audit_header_beneficiary_idx ON audit_header (benefic
 CREATE TABLE IF NOT EXISTS audit_detail (
   id           TEXT PRIMARY KEY,
   audit_id     TEXT NOT NULL REFERENCES audit_header(id) ON DELETE CASCADE,
-  category_no  TEXT NOT NULL REFERENCES audit_category_master(category_no) ON DELETE RESTRICT,
+  category_no  TEXT NOT NULL REFERENCES audit_category_master(id) ON DELETE RESTRICT,
   status_flag  TEXT CHECK (status_flag IN ('Y', 'N', 'NA', 'UN')),
   rating       SMALLINT CHECK (rating BETWEEN 1 AND 4),
   remarks      TEXT,
@@ -477,13 +496,16 @@ CREATE TABLE IF NOT EXISTS audit_detail (
 );
 
 -- ---------------------------------------------------------------------------
--- Content: now tied to a material (several files per material). Added as
--- ALTERs so the existing LSP content table is reused as it is: file_type
--- already holds Video / Document / etc., and file_url / storage_path point at
--- the file in R2. title stays required -- use the file name when no separate
--- title is given.
+-- Content: tied to a material (several files per material), not to a
+-- service category. Added as ALTERs so the existing LSP content table is
+-- reused: file_type holds Video / Document / etc., and file_url / storage_path
+-- point at the file in R2. The file's display name is file_name; title is no
+-- longer required. Rows created in LSP days have no material_id -- the admin
+-- Content screen flags them so they can be linked to a material or removed.
 -- ---------------------------------------------------------------------------
 
+ALTER TABLE content DROP COLUMN IF EXISTS category_id;
+ALTER TABLE content ALTER COLUMN title DROP NOT NULL;
 ALTER TABLE content ADD COLUMN IF NOT EXISTS material_id TEXT REFERENCES material_master(id) ON DELETE SET NULL;
 ALTER TABLE content ADD COLUMN IF NOT EXISTS file_name TEXT;
 ALTER TABLE content ADD COLUMN IF NOT EXISTS remarks TEXT;

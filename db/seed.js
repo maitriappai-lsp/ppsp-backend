@@ -58,13 +58,6 @@ async function seed() {
     `);
 
     await pool.query(`
-      INSERT INTO content (id, title, category_id, file_type, uploaded_by, date) VALUES
-        ('CNT-0001', 'Body Language Basics -- facilitator deck', 'LSS-SS-CS-002', 'PPT', 'R-002', '2026-09-01'),
-        ('CNT-0002', 'Empathy circle activity guide', 'LSS-SS-CS-001', 'PDF', 'R-002', '2026-08-14')
-      ON CONFLICT (id) DO NOTHING;
-    `);
-
-    await pool.query(`
       INSERT INTO system_parameters (id, product_type, org_name, max_named_users, product_validity_end, login_by_email, gps_on_beneficiary, allowed_upload_types) VALUES
         (TRUE, 'Education', 'Maitri Trust', 999, '2027-05-31', FALSE, TRUE, '["photo","pdf","ppt"]')
       ON CONFLICT (id) DO NOTHING;

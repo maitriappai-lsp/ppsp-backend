@@ -48,6 +48,7 @@ const TABLES = {
   dsrDetail: 'dsr_detail',
   audits: 'audit_header',
   auditDetail: 'audit_detail',
+  auditCategories: 'audit_category_master', // id = the category number, e.g. '2.13'
 };
 
 function sqlTable(clientTable) {
@@ -100,6 +101,7 @@ function friendlyDuplicateMessage(constraintName, err) {
     dsr_one_per_resource_per_day: 'A DSR already exists for this resource on this date.',
     audit_visit_number_per_beneficiary: 'That visit number already exists for this beneficiary.',
     audit_detail_audit_category_unique: 'This audit already has an answer for that checklist item.',
+    audit_category_master_pkey: 'That category number already exists.',
   };
   if (known[constraintName]) return known[constraintName];
   // The allocation trigger raises its own readable message.

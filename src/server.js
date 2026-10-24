@@ -32,8 +32,8 @@ app.use('/api', requireAuth);
 // matching the shape of store.js's initial `db` state object: one key per
 // table in routes/tables.js's TABLES (resources, beneficiaries, ...,
 // materialMaster, studentMaster, bookMaster, allocations, stockUpdate,
-// bookUpdate, dsr, dsrDetail, audits, auditDetail) plus overrides,
-// systemParameters and auditCategories (the read-only audit checklist).
+// bookUpdate, dsr, dsrDetail, audits, auditDetail, auditCategories) plus
+// overrides and systemParameters.
 app.get('/api/db', async (req, res, next) => {
   try {
     const keys = Object.keys(TABLES);
@@ -44,7 +44,6 @@ app.get('/api/db', async (req, res, next) => {
     });
     const { rows: overrideRows } = await pool.query('SELECT * FROM overrides ORDER BY timestamp DESC');
     const { rows: spRows } = await pool.query('SELECT * FROM system_parameters LIMIT 1');
-    const { rows: auditCatRows } = await pool.query('SELECT * FROM audit_category_master ORDER BY sort_order');
 
     res.json({
       ...data,
@@ -54,7 +53,6 @@ app.get('/api/db', async (req, res, next) => {
       // from crashing. Delete these two lines once those screens are gone.
       schedule: [],
       psr: [],
-      auditCategories: auditCatRows.map(rowToRecord),
       overrides: overrideRows.map(rowToRecord),
       systemParameters: spRows[0] ? rowToRecord(spRows[0]) : null,
     });
