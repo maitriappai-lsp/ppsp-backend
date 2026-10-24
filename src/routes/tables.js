@@ -32,11 +32,22 @@ const TABLES = {
   beneficiaries: 'beneficiaries',
   categories: 'categories',
   geo: 'geo',
-  schedule: 'schedule',
-  psr: 'psr',
   attendance: 'attendance',
   uploads: 'uploads',
   content: 'content',
+
+  // ---- PPSP ----
+  // (Schedule and Sessions/psr are gone from PPSP.)
+  materialMaster: 'material_master',
+  studentMaster: 'student_master',
+  bookMaster: 'book_master',
+  allocations: 'beneficiary_resource_allocation',
+  stockUpdate: 'stock_update',
+  bookUpdate: 'book_update',
+  dsr: 'dsr_header',
+  dsrDetail: 'dsr_detail',
+  audits: 'audit_header',
+  auditDetail: 'audit_detail',
 };
 
 function sqlTable(clientTable) {
@@ -77,12 +88,61 @@ router.get('/:table', async (req, res, next) => {
 // the client already generated via nextId()/nextIds(). If that id is
 // already taken, we self-heal by asking Postgres for the true next free
 // number with the same prefix and retrying (see header comment).
-function friendlyDuplicateMessage(constraintName) {
+function friendlyDuplicateMessage(constraintName, err) {
   const known = {
     beneficiaries_school_class_section_unique: 'A beneficiary with this School, Class and Section already exists.',
     categories_pillar_topic_subtopic_unique: 'A category with this Pillar, Topic and Sub-topic already exists.',
+    material_master_category_name_type_unique: 'A material with this Category, Name and Type already exists.',
+    allocation_active_resource1_unique: 'That resource is already in another active allocation. Make that one inactive first.',
+    allocation_active_resource2_unique: 'That resource is already in another active allocation. Make that one inactive first.',
+    stock_update_beneficiary_material_unique: 'Stock for this material already exists for this beneficiary -- edit that row instead.',
+    book_update_beneficiary_book_unique: 'This book already exists for this beneficiary -- edit that row instead.',
+    dsr_one_per_resource_per_day: 'A DSR already exists for this resource on this date.',
+    audit_visit_number_per_beneficiary: 'That visit number already exists for this beneficiary.',
+    audit_detail_audit_category_unique: 'This audit already has an answer for that checklist item.',
   };
-  return known[constraintName] || 'Duplicate id or unique field';
+  if (known[constraintName]) return known[constraintName];
+  // The allocation trigger raises its own readable message.
+  if (err && /only one active/i.test(err.message || '')) return err.message;
+  return 'Duplicate id or unique field';
+}
+
+function friendlyCheckMessage(constraintName) {
+  const known = {
+    dsr_submitted_is_complete: 'A submitted DSR needs time in, both child counts and all three RAG ratings.',
+    allocation_distinct_resources: 'Resource 1 and Resource 2 must be different people.',
+    audit_distinct_facilitators: 'Facilitator 1 and Facilitator 2 must be different people.',
+    audit_submitted_has_timestamp: 'A submitted audit needs a submitted time.',
+  };
+  return known[constraintName] || 'A value is out of range, or a required field is missing.';
+}
+
+// Turns the Postgres errors the PPSP tables can raise on purpose (unique,
+// foreign-key and check constraints) into a readable 4xx instead of a
+// generic 500. Returns null for anything else.
+function mapDbError(err) {
+  if (err.code === '23505') {
+    return { status: 409, body: { error: friendlyDuplicateMessage(err.constraint, err), detail: err.detail } };
+  }
+  if (err.code === '23503') {
+    const stillUsed = /is still referenced/i.test(err.detail || '');
+    return {
+      status: 409,
+      body: {
+        error: stillUsed
+          ? "This record is still used by other records (for example students, allocations, stock, DSRs or attendance), so it can't be deleted. Remove or reassign those first."
+          : "A linked record (beneficiary, resource, material or book) doesn't exist.",
+        detail: err.detail,
+      },
+    };
+  }
+  if (err.code === '23514') {
+    return { status: 400, body: { error: friendlyCheckMessage(err.constraint), detail: err.detail } };
+  }
+  if (err.code === '22P02' || err.code === '22007' || err.code === '22008') {
+    return { status: 400, body: { error: 'One of the values has an invalid format.', detail: err.message } };
+  }
+  return null;
 }
 
 router.post('/:table', async (req, res, next) => {
@@ -93,8 +153,7 @@ router.post('/:table', async (req, res, next) => {
 
     if (!record.id) return res.status(400).json({ error: 'record.id is required' });
 
-    // Booking rules (one session per beneficiary per day, no double-booked
-    // resources, no overlapping check-ins) -- see scheduleRules.js.
+    // Write rules (currently: no overlapping attendance check-ins) -- see scheduleRules.js.
     const ruleError = await checkWriteRules(pool, clientTable, record, { creating: true });
     if (ruleError) return res.status(409).json({ error: ruleError });
 
@@ -126,9 +185,8 @@ router.post('/:table', async (req, res, next) => {
       } catch (err) {
         const isIdConflict = err.code === '23505' && /_pkey$/.test(err.constraint || '');
         if (!isIdConflict || !idPattern) {
-          if (err.code === '23505') {
-            return res.status(409).json({ error: friendlyDuplicateMessage(err.constraint), detail: err.detail });
-          }
+          const mapped = mapDbError(err);
+          if (mapped) return res.status(mapped.status).json(mapped.body);
           throw err;
         }
 
@@ -172,22 +230,6 @@ router.patch('/:table/:id', async (req, res, next) => {
     const columns = Object.keys(row);
     if (columns.length === 0) return res.status(400).json({ error: 'Empty patch' });
 
-    // Only re-check when the patch touches something a rule depends on. The
-    // check runs on the row as it WOULD be after the patch (existing values
-    // merged with the patch), ignoring the row itself.
-    const RULE_FIELDS = {
-      schedule: ['date', 'time', 'beneficiaryId', 'facilitatorId', 'assistantId'],
-      psr: ['date', 'timeIn', 'timeOut', 'beneficiaryId', 'facilitatorId', 'assistantId'],
-    };
-    if (RULE_FIELDS[clientTable] && RULE_FIELDS[clientTable].some((k) => k in patch)) {
-      const { rows: current } = await pool.query(`SELECT * FROM ${table} WHERE id = $1`, [req.params.id]);
-      if (current.length > 0) {
-        const merged = { ...rowToRecord(current[0]), ...patch };
-        const ruleError = await checkWriteRules(pool, clientTable, merged, { ignoreId: req.params.id });
-        if (ruleError) return res.status(409).json({ error: ruleError });
-      }
-    }
-
     const setClause = columns.map((c, i) => `${c} = $${i + 1}`).join(', ');
     const values = Object.values(row);
 
@@ -198,9 +240,8 @@ router.patch('/:table/:id', async (req, res, next) => {
     if (rows.length === 0) return res.status(404).json({ error: 'Not found' });
     res.json(scrub(clientTable, rowToRecord(rows[0])));
   } catch (err) {
-    if (err.code === '23505') {
-      return res.status(409).json({ error: friendlyDuplicateMessage(err.constraint), detail: err.detail });
-    }
+    const mapped = mapDbError(err);
+    if (mapped) return res.status(mapped.status).json(mapped.body);
     next(err);
   }
 });
@@ -213,6 +254,8 @@ router.delete('/:table/:id', async (req, res, next) => {
     if (rowCount === 0) return res.status(404).json({ error: 'Not found' });
     res.status(204).end();
   } catch (err) {
+    const mapped = mapDbError(err);
+    if (mapped) return res.status(mapped.status).json(mapped.body);
     next(err);
   }
 });

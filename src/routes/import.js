@@ -4,10 +4,7 @@
 // reads the first worksheet with exceljs, and upserts rows by a natural key
 // per table (not the internal R-0001-style id, which an Excel sheet
 // wouldn't know) -- re-importing the same sheet updates existing rows
-// instead of duplicating them. Schedule has no natural key of its own, so
-// it always appends; each row's beneficiary/facilitator are resolved from
-// human-readable columns (school/class/section, facilitator phone) rather
-// than requiring internal ids in the sheet.
+// instead of duplicating them. (Schedule no longer exists in PPSP.)
 //
 // Expected column headers (case-insensitive, any order) per table:
 //   resources:     Name, Phone, Email, Address, Type, Role, Blood Group,
@@ -15,14 +12,19 @@
 //   beneficiaries: School, Class, Section
 //   categories:    Pillar, Topic, Subtopic
 //   geo:           School, Label, Latitude, Longitude, Radius Meters
-//   schedule:      School, Class, Section, Facilitator Phone, Date, Time,
-//                  Pillar, Topic, Subtopic, Assistant Phone (optional)
+//   materialMaster: Material Category, Material Name, Material Type (optional),
+//                  Material Activities (optional, comma separated, e.g. P,M1,M2),
+//                  Material ID (optional)
+//   studentMaster: Beneficiary ID (or School, Class, Section), Student Name,
+//                  Student ID (optional), Joined Date (optional),
+//                  Parent Name (optional), Parent Contact (optional)
+//   bookMaster:    Title, Language, Classification, Author (optional),
+//                  Book ID (optional)
 // ---------------------------------------------------------------------------
 const express = require('express');
 const multer = require('multer');
 const ExcelJS = require('exceljs');
 const pool = require('../db');
-const { checkWriteRules } = require('../scheduleRules');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -200,73 +202,197 @@ async function importGeo(rows) {
   return result;
 }
 
-async function importSchedule(rows) {
-  let seq = await nextSeq('SCH', 'schedule');
+// ---- PPSP masters -------------------------------------------------------
+
+// First non-empty value among several accepted header spellings (headers
+// are lower-cased by readRows).
+function pick(r, ...keys) {
+  for (const k of keys) {
+    if (r[k] !== undefined && String(r[k]).trim() !== '') return String(r[k]).trim();
+  }
+  return '';
+}
+
+function parseList(value) {
+  const seen = new Set();
+  return String(value || '')
+    .split(/[,;]/)
+    .map((s) => s.trim())
+    .filter((s) => s && !seen.has(s.toLowerCase()) && seen.add(s.toLowerCase()));
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+async function importMaterialMaster(rows) {
+  let seq = await nextSeq('MAT', 'material_master');
   const result = { inserted: 0, updated: 0, skipped: 0, errors: [] };
   for (const [i, r] of rows.entries()) {
-    if (!r.school || !r.class || !r['facilitator phone'] || !r.date || !r.time) {
+    const category = pick(r, 'material category', 'category');
+    const name = pick(r, 'material name', 'name');
+    const type = pick(r, 'material type', 'type');
+    const givenId = pick(r, 'material id', 'id');
+    const activities = parseList(pick(r, 'material activities', 'activities'));
+    if (!category || !name) {
       result.skipped++;
-      result.errors.push(`Row ${i + 2}: School, Class, Facilitator Phone, Date and Time are required.`);
+      result.errors.push(`Row ${i + 2}: Material Category and Material Name are required.`);
       continue;
     }
-    const ben = await pool.query(
-      'SELECT id FROM beneficiaries WHERE LOWER(school)=LOWER($1) AND LOWER(class)=LOWER($2) AND LOWER(COALESCE(section,\'\'))=LOWER($3)',
-      [r.school, r.class, r.section || '']
+    // Category + name + type is the natural key (blank type compares as '').
+    const existing = await pool.query(
+      `SELECT id FROM material_master
+       WHERE LOWER(category)=LOWER($1) AND LOWER(name)=LOWER($2) AND LOWER(COALESCE(type,''))=LOWER($3)`,
+      [category, name, type]
     );
-    if (!ben.rows.length) {
-      result.skipped++;
-      result.errors.push(`Row ${i + 2}: No beneficiary matches ${r.school} / ${r.class} / ${r.section || ''}.`);
+    if (existing.rows.length) {
+      await pool.query('UPDATE material_master SET activities=$1, updated_at=now() WHERE id=$2', [
+        activities,
+        existing.rows[0].id,
+      ]);
+      result.updated++;
       continue;
     }
-    const fac = await pool.query('SELECT id FROM resources WHERE phone = $1', [r['facilitator phone']]);
-    if (!fac.rows.length) {
-      result.skipped++;
-      result.errors.push(`Row ${i + 2}: No facilitator with phone ${r['facilitator phone']}.`);
-      continue;
-    }
-    // Optional: leave the Assistant Phone cell blank for no assistant. If a
-    // phone IS given but matches no resource, skip the row (same as an
-    // unknown facilitator) rather than silently dropping the assistant.
-    let assistantId = null;
-    if (r['assistant phone']) {
-      const asst = await pool.query('SELECT id FROM resources WHERE phone = $1', [r['assistant phone']]);
-      if (!asst.rows.length) {
+    let id;
+    if (givenId) {
+      const taken = await pool.query('SELECT 1 FROM material_master WHERE id=$1', [givenId]);
+      if (taken.rows.length) {
         result.skipped++;
-        result.errors.push(`Row ${i + 2}: No assistant with phone ${r['assistant phone']}.`);
+        result.errors.push(`Row ${i + 2}: Material ID ${givenId} is already used by a different material.`);
         continue;
       }
-      assistantId = asst.rows[0].id;
+      id = givenId;
+    } else {
+      seq += 1;
+      id = `MAT-${String(seq).padStart(4, '0')}`;
     }
-    // Booking rules: one session per beneficiary per day, and the facilitator
-    // and assistant must each be free (as facilitator OR assistant) around
-    // this start time -- see scheduleRules.js.
-    const ruleError = await checkWriteRules(pool, 'schedule', {
-      date: r.date,
-      time: r.time,
-      beneficiaryId: ben.rows[0].id,
-      facilitatorId: fac.rows[0].id,
-      assistantId,
-    });
-    if (ruleError) {
-      result.skipped++;
-      result.errors.push(`Row ${i + 2}: ${ruleError}`);
-      continue;
-    }
-    let categoryId = null;
-    if (r.pillar) {
-      const cat = await pool.query(
-        'SELECT id FROM categories WHERE LOWER(pillar)=LOWER($1) AND LOWER(COALESCE(topic,\'\'))=LOWER($2) AND LOWER(COALESCE(subtopic,\'\'))=LOWER($3)',
-        [r.pillar, r.topic || '', r.subtopic || '']
-      );
-      if (cat.rows.length) categoryId = cat.rows[0].id;
-    }
-    seq += 1;
-    const id = `SCH-${String(seq).padStart(4, '0')}`;
     await pool.query(
-      'INSERT INTO schedule (id, beneficiary_id, facilitator_id, assistant_id, date, time, category_id) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-      [id, ben.rows[0].id, fac.rows[0].id, assistantId, r.date, r.time, categoryId]
+      'INSERT INTO material_master (id, category, name, type, activities) VALUES ($1,$2,$3,$4,$5)',
+      [id, category, name, type || null, activities]
     );
     result.inserted++;
+  }
+  return result;
+}
+
+async function importStudentMaster(rows, ctx = {}) {
+  let seq = await nextSeq('STU', 'student_master');
+  const result = { inserted: 0, updated: 0, skipped: 0, errors: [] };
+  for (const [i, r] of rows.entries()) {
+    const name = pick(r, 'student name', 'name');
+    if (!name) {
+      result.skipped++;
+      result.errors.push(`Row ${i + 2}: Student Name is required.`);
+      continue;
+    }
+
+    // Beneficiary: by Beneficiary ID, else by School / Class / Section.
+    let beneficiaryId = pick(r, 'beneficiary id');
+    if (beneficiaryId) {
+      const b = await pool.query('SELECT id FROM beneficiaries WHERE id=$1', [beneficiaryId]);
+      if (!b.rows.length) {
+        result.skipped++;
+        result.errors.push(`Row ${i + 2}: No beneficiary with ID ${beneficiaryId}.`);
+        continue;
+      }
+    } else {
+      const school = pick(r, 'school');
+      const klass = pick(r, 'class');
+      if (!school || !klass) {
+        result.skipped++;
+        result.errors.push(`Row ${i + 2}: Beneficiary ID (or School and Class) is required.`);
+        continue;
+      }
+      const b = await pool.query(
+        "SELECT id FROM beneficiaries WHERE LOWER(school)=LOWER($1) AND LOWER(class)=LOWER($2) AND LOWER(COALESCE(section,''))=LOWER($3)",
+        [school, klass, pick(r, 'section')]
+      );
+      if (!b.rows.length) {
+        result.skipped++;
+        result.errors.push(`Row ${i + 2}: No beneficiary matches ${school} / ${klass} / ${pick(r, 'section')}.`);
+        continue;
+      }
+      beneficiaryId = b.rows[0].id;
+    }
+
+    const joined = pick(r, 'joined date (optional)', 'joined date');
+    if (joined && !DATE_RE.test(joined)) {
+      result.skipped++;
+      result.errors.push(`Row ${i + 2}: Joined Date should be a date like 2026-06-01.`);
+      continue;
+    }
+    const parentName = pick(r, 'parent name (optional)', 'parent name') || null;
+    const parentContact = pick(r, 'parent contact (optional)', 'parent contact') || null;
+    const givenId = pick(r, 'student id');
+
+    const existing = givenId
+      ? await pool.query('SELECT id FROM student_master WHERE id=$1', [givenId])
+      : await pool.query('SELECT id FROM student_master WHERE beneficiary_id=$1 AND LOWER(name)=LOWER($2)', [
+          beneficiaryId,
+          name,
+        ]);
+    if (existing.rows.length) {
+      await pool.query(
+        `UPDATE student_master SET beneficiary_id=$1, name=$2, joined_date=$3, parent_name=$4,
+         parent_contact=$5, updated_by=$6, updated_at=now() WHERE id=$7`,
+        [beneficiaryId, name, joined || null, parentName, parentContact, ctx.userId || null, existing.rows[0].id]
+      );
+      result.updated++;
+    } else {
+      let id = givenId;
+      if (!id) {
+        seq += 1;
+        id = `STU-${String(seq).padStart(4, '0')}`;
+      }
+      await pool.query(
+        `INSERT INTO student_master (id, beneficiary_id, name, joined_date, parent_name, parent_contact, updated_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [id, beneficiaryId, name, joined || null, parentName, parentContact, ctx.userId || null]
+      );
+      result.inserted++;
+    }
+  }
+  return result;
+}
+
+async function importBookMaster(rows) {
+  let seq = await nextSeq('BK', 'book_master');
+  const result = { inserted: 0, updated: 0, skipped: 0, errors: [] };
+  for (const [i, r] of rows.entries()) {
+    const title = pick(r, 'title');
+    if (!title) {
+      result.skipped++;
+      result.errors.push(`Row ${i + 2}: Title is required.`);
+      continue;
+    }
+    const language = pick(r, 'language') || null;
+    const classification = pick(r, 'classification') || null;
+    const author = pick(r, 'author (optional)', 'author') || null;
+    const givenId = pick(r, 'book id');
+
+    const existing = givenId
+      ? await pool.query('SELECT id FROM book_master WHERE id=$1', [givenId])
+      : await pool.query(
+          `SELECT id FROM book_master WHERE LOWER(title)=LOWER($1)
+           AND LOWER(COALESCE(language,''))=LOWER($2) AND LOWER(COALESCE(author,''))=LOWER($3)`,
+          [title, language || '', author || '']
+        );
+    if (existing.rows.length) {
+      await pool.query(
+        'UPDATE book_master SET title=$1, language=$2, classification=$3, author=$4, updated_at=now() WHERE id=$5',
+        [title, language, classification, author, existing.rows[0].id]
+      );
+      result.updated++;
+    } else {
+      let id = givenId;
+      if (!id) {
+        seq += 1;
+        id = `BK-${String(seq).padStart(4, '0')}`;
+      }
+      await pool.query(
+        'INSERT INTO book_master (id, title, language, classification, author) VALUES ($1,$2,$3,$4,$5)',
+        [id, title, language, classification, author]
+      );
+      result.inserted++;
+    }
   }
   return result;
 }
@@ -276,7 +402,9 @@ const IMPORTERS = {
   beneficiaries: importBeneficiaries,
   categories: importCategories,
   geo: importGeo,
-  schedule: importSchedule,
+  materialMaster: importMaterialMaster,
+  studentMaster: importStudentMaster,
+  bookMaster: importBookMaster,
 };
 
 router.post('/:table', upload.single('file'), async (req, res, next) => {
@@ -288,7 +416,7 @@ router.post('/:table', upload.single('file'), async (req, res, next) => {
     const rows = await readRows(req.file.buffer);
     if (rows.length === 0) return res.status(400).json({ error: 'No data rows found in the sheet.' });
 
-    const result = await importer(rows);
+    const result = await importer(rows, { userId: req.user?.sub });
     res.json(result);
   } catch (err) {
     next(err);

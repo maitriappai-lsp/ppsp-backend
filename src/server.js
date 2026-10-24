@@ -29,26 +29,32 @@ app.use('/api/auth', authRouter);
 app.use('/api', requireAuth);
 
 // GET /api/db -- the client's single "give me everything" call on startup,
-// matching the shape of store.js's initial `db` state object exactly:
-// { resources, beneficiaries, categories, geo, schedule, psr, attendance,
-//   uploads, content, overrides, systemParameters }
+// matching the shape of store.js's initial `db` state object: one key per
+// table in routes/tables.js's TABLES (resources, beneficiaries, ...,
+// materialMaster, studentMaster, bookMaster, allocations, stockUpdate,
+// bookUpdate, dsr, dsrDetail, audits, auditDetail) plus overrides,
+// systemParameters and auditCategories (the read-only audit checklist).
 app.get('/api/db', async (req, res, next) => {
   try {
-    const [resources, beneficiaries, categories, geo, schedule, psr, attendance, uploads, content] =
-      await Promise.all(Object.keys(TABLES).map(fetchTable));
+    const keys = Object.keys(TABLES);
+    const tables = await Promise.all(keys.map(fetchTable));
+    const data = {};
+    keys.forEach((k, i) => {
+      data[k] = tables[i];
+    });
     const { rows: overrideRows } = await pool.query('SELECT * FROM overrides ORDER BY timestamp DESC');
     const { rows: spRows } = await pool.query('SELECT * FROM system_parameters LIMIT 1');
+    const { rows: auditCatRows } = await pool.query('SELECT * FROM audit_category_master ORDER BY sort_order');
 
     res.json({
-      resources,
-      beneficiaries,
-      categories,
-      geo,
-      schedule,
-      psr,
-      attendance,
-      uploads,
-      content,
+      ...data,
+      // TEMPORARY: Schedule and Sessions (psr) no longer exist in PPSP, but
+      // the Sessions screens/dashboard tabs haven't been taken out of the
+      // app yet and still read db.schedule / db.psr. Empty arrays keep them
+      // from crashing. Delete these two lines once those screens are gone.
+      schedule: [],
+      psr: [],
+      auditCategories: auditCatRows.map(rowToRecord),
       overrides: overrideRows.map(rowToRecord),
       systemParameters: spRows[0] ? rowToRecord(spRows[0]) : null,
     });
@@ -70,5 +76,5 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Maitri LSP backend listening on http://localhost:${PORT}`);
+  console.log(`Maitri PPSP backend listening on http://localhost:${PORT}`);
 });

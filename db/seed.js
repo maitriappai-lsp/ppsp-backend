@@ -52,20 +52,6 @@ async function seed() {
     `);
 
     await pool.query(`
-      INSERT INTO schedule (id, beneficiary_id, facilitator_id, date, time, category_id) VALUES
-        ('SCH-0001', 'EC-ALW-CL6-A', 'R-001', '2026-09-18', '10:00', 'LSS-SS-CS-002'),
-        ('SCH-0002', 'EC-CAN-CL6-B', 'R-023', '2026-09-19', '11:30', 'LSS-VE-OTH-000')
-      ON CONFLICT (id) DO NOTHING;
-    `);
-
-    await pool.query(`
-      INSERT INTO psr (id, beneficiary_id, facilitator_id, date, time_in, time_out, category_id, students_present, rating, rag, facilitator_feedback, school_feedback, photos_uploaded) VALUES
-        ('PSR-0001', 'EC-ALW-CL6-A', 'R-001', '2026-09-16', '10:02 AM', '10:58 AM', 'LSS-SS-CS-002', 28, 'Good', 'Amber', 'Good engagement, a few students shy to role-play.', 'Requested more sessions on this topic.', TRUE),
-        ('PSR-0002', 'EC-CAN-CL6-B', 'R-023', '2026-09-12', '11:32 AM', '12:20 PM', 'LSS-SS-CS-001', 31, 'Excellent', 'Green', 'Empathy circle activity landed very well.', '', TRUE)
-      ON CONFLICT (id) DO NOTHING;
-    `);
-
-    await pool.query(`
       INSERT INTO uploads (id, file_name, beneficiary_id, category_id, facilitator_id, date, description) VALUES
         ('UPL-0001', 'session_alwarpet_16sep.jpg', 'EC-ALW-CL6-A', 'LSS-SS-CS-002', 'R-001', '2026-09-16', 'Role-play activity photo')
       ON CONFLICT (id) DO NOTHING;
