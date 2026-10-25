@@ -44,9 +44,12 @@ app.get('/api/db', async (req, res, next) => {
     });
     const { rows: overrideRows } = await pool.query('SELECT * FROM overrides ORDER BY timestamp DESC');
     const { rows: spRows } = await pool.query('SELECT * FROM system_parameters LIMIT 1');
+    // Which students worked on each DSR line (read-only here; written by the DSR screens).
+    const { rows: dsrStudentRows } = await pool.query('SELECT * FROM dsr_detail_students');
 
     res.json({
       ...data,
+      dsrDetailStudents: dsrStudentRows.map(rowToRecord),
       overrides: overrideRows.map(rowToRecord),
       systemParameters: spRows[0] ? rowToRecord(spRows[0]) : null,
     });

@@ -135,6 +135,40 @@ router.get('/table/:table', async (req, res, next) => {
       sheet.addRow(Object.fromEntries(Object.entries(rec).map(([k, v]) => [k, Array.isArray(v) ? v.join(', ') : v])))
     );
 
+    // A DSR / audit is exported together with its lines, as a second sheet,
+    // so the spreadsheet carries the whole record. Same ids filter as above.
+    const wanted = idsParam ? records.map((r) => r.id) : null;
+    if (req.params.table === 'dsr') {
+      const { rows: lines } = await pool.query(
+        `SELECT d.dsr_id, h.dsr_date, r.name AS resource, m.category AS material_category, m.name AS material,
+                m.type AS material_type, d.material_activity AS activity,
+                CASE d.session_period WHEN 'M' THEN 'Morning' ELSE 'Afternoon' END AS session_period,
+                COALESCE((SELECT string_agg(s.name, ', ' ORDER BY s.name)
+                            FROM dsr_detail_students ds JOIN student_master s ON s.id = ds.student_id
+                           WHERE ds.dsr_detail_id = d.id), '') AS students
+           FROM dsr_detail d
+           JOIN dsr_header h ON h.id = d.dsr_id
+           JOIN material_master m ON m.id = d.material_id
+           LEFT JOIN resources r ON r.id = h.resource_id
+          WHERE ($1::text[] IS NULL OR d.dsr_id = ANY($1::text[]))
+          ORDER BY d.dsr_id, d.id`,
+        [wanted]
+      );
+      addRowsSheet(workbook, 'dsr lines', lines);
+    } else if (req.params.table === 'audits') {
+      const { rows: lines } = await pool.query(
+        `SELECT d.audit_id, h.audit_date, h.visit_number, c.id AS category_no, c.description,
+                d.status_flag, d.rating, d.remarks
+           FROM audit_detail d
+           JOIN audit_header h ON h.id = d.audit_id
+           JOIN audit_category_master c ON c.id = d.category_no
+          WHERE ($1::text[] IS NULL OR d.audit_id = ANY($1::text[]))
+          ORDER BY d.audit_id, c.sort_order`,
+        [wanted]
+      );
+      addRowsSheet(workbook, 'audit lines', lines);
+    }
+
     const buffer = await workbook.xlsx.writeBuffer();
     const filename = `${req.params.table}-export.xlsx`;
     res.json({ filename, base64: Buffer.from(buffer).toString('base64') });
@@ -142,5 +176,19 @@ router.get('/table/:table', async (req, res, next) => {
     next(err);
   }
 });
+
+// Adds a worksheet from plain query rows (snake_case columns -> Title Case headers).
+function addRowsSheet(workbook, name, rows) {
+  const sheet = workbook.addWorksheet(name.slice(0, 31));
+  const keys = rows.length > 0 ? Object.keys(rows[0]) : [];
+  sheet.columns = keys.map((k) => ({ header: titleCaseHeader(rowKey(k)), key: k, width: 22 }));
+  sheet.getRow(1).font = { bold: true };
+  rows.forEach((r) => sheet.addRow(r));
+}
+
+// snake_case -> camelCase, so titleCaseHeader (which expects camelCase) can be reused.
+function rowKey(k) {
+  return k.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+}
 
 module.exports = router;
