@@ -133,7 +133,6 @@ CREATE TABLE IF NOT EXISTS uploads (
   id             TEXT PRIMARY KEY,
   file_name      TEXT NOT NULL,
   beneficiary_id TEXT REFERENCES beneficiaries(id) ON DELETE SET NULL,
-  category_id    TEXT REFERENCES categories(id) ON DELETE SET NULL,
   facilitator_id TEXT REFERENCES resources(id) ON DELETE SET NULL,
   date           DATE NOT NULL,
   description    TEXT,
@@ -512,3 +511,13 @@ ALTER TABLE content ADD COLUMN IF NOT EXISTS file_name TEXT;
 ALTER TABLE content ADD COLUMN IF NOT EXISTS activity TEXT;
 ALTER TABLE content ADD COLUMN IF NOT EXISTS remarks TEXT;
 CREATE INDEX IF NOT EXISTS content_material_idx ON content (material_id);
+
+-- ---------------------------------------------------------------------------
+-- Uploads: linked to a material ("Link to Materials/Work"), not to a service
+-- category. Optional -- an upload can be general work with no material.
+-- Existing rows lose their old category link (the column is dropped).
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS material_id TEXT REFERENCES material_master(id) ON DELETE SET NULL;
+ALTER TABLE uploads DROP COLUMN IF EXISTS category_id;
+CREATE INDEX IF NOT EXISTS uploads_material_idx ON uploads (material_id);

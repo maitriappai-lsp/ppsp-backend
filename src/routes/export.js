@@ -44,14 +44,19 @@ const EXPORTS = {
       { header: 'Date', key: 'date', width: 12 },
       { header: 'Facilitator', key: 'facilitator', width: 22 },
       { header: 'School', key: 'school', width: 20 },
+      { header: 'Material Category', key: 'material_category', width: 20 },
+      { header: 'Material', key: 'material', width: 24 },
+      { header: 'Material Type', key: 'material_type', width: 16 },
       { header: 'File Name', key: 'file_name', width: 30 },
       { header: 'Description', key: 'description', width: 30 },
     ],
     query: `
-      SELECT u.date, r.name AS facilitator, b.school, u.file_name, u.description
+      SELECT u.date, r.name AS facilitator, b.school, m.category AS material_category, m.name AS material,
+             m.type AS material_type, u.file_name, u.description
       FROM uploads u
       LEFT JOIN resources r ON r.id = u.facilitator_id
       LEFT JOIN beneficiaries b ON b.id = u.beneficiary_id
+      LEFT JOIN material_master m ON m.id = u.material_id
       WHERE u.date >= $1 AND u.date <= $2 AND ($3::text IS NULL OR u.facilitator_id = $3)
       ORDER BY u.date DESC
     `,

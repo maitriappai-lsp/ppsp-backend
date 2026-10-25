@@ -52,8 +52,8 @@ async function seed() {
     `);
 
     await pool.query(`
-      INSERT INTO uploads (id, file_name, beneficiary_id, category_id, facilitator_id, date, description) VALUES
-        ('UPL-0001', 'session_alwarpet_16sep.jpg', 'EC-ALW-CL6-A', 'LSS-SS-CS-002', 'R-001', '2026-09-16', 'Role-play activity photo')
+      INSERT INTO uploads (id, file_name, beneficiary_id, facilitator_id, date, description) VALUES
+        ('UPL-0001', 'session_alwarpet_16sep.jpg', 'EC-ALW-CL6-A', 'R-001', '2026-09-16', 'Activity photo')
       ON CONFLICT (id) DO NOTHING;
     `);
 
