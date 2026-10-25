@@ -508,5 +508,7 @@ ALTER TABLE content DROP COLUMN IF EXISTS category_id;
 ALTER TABLE content ALTER COLUMN title DROP NOT NULL;
 ALTER TABLE content ADD COLUMN IF NOT EXISTS material_id TEXT REFERENCES material_master(id) ON DELETE SET NULL;
 ALTER TABLE content ADD COLUMN IF NOT EXISTS file_name TEXT;
+-- One of the selected material's activities (material_master.activities); optional.
+ALTER TABLE content ADD COLUMN IF NOT EXISTS activity TEXT;
 ALTER TABLE content ADD COLUMN IF NOT EXISTS remarks TEXT;
 CREATE INDEX IF NOT EXISTS content_material_idx ON content (material_id);

@@ -87,20 +87,18 @@ async function fixTable(table) {
 
 async function main() {
   const attendanceResult = await fixTable('attendance');
-  const psrResult = await fixTable('psr');
 
   console.log(
     `attendance: ${attendanceResult.checked} row(s) needed a look, ${attendanceResult.updated} updated.`
   );
-  console.log(`psr: ${psrResult.checked} row(s) needed a look, ${psrResult.updated} updated.`);
 
-  const unparseable = [...attendanceResult.unparseable, ...psrResult.unparseable];
+  const unparseable = [...attendanceResult.unparseable];
   if (unparseable.length > 0) {
     console.log(`\n${unparseable.length} value(s) could not be parsed and were left as-is:`);
     for (const u of unparseable) {
       console.log(`  ${u.table} ${u.id} ${u.column}: ${JSON.stringify(u.value)}`);
     }
-    console.log('Fix these manually, e.g. through the app\'s own attendance/session edit screens.');
+    console.log('Fix these manually, e.g. through the app\'s own attendance edit screens.');
   }
 
   await pool.end();

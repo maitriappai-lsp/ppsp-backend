@@ -27,11 +27,10 @@ const EXPORTS = {
       { header: 'Time Out', key: 'time_out', width: 12 },
       { header: 'Students Present', key: 'students_present', width: 16 },
       { header: 'Geofence Verified', key: 'geo_verified', width: 16 },
-      { header: 'Ad-hoc', key: 'ad_hoc', width: 10 },
     ],
     query: `
       SELECT a.date, r.name AS facilitator, b.school, b.class AS klass, b.section,
-             a.time_in, a.time_out, a.students_present, a.geo_verified, a.ad_hoc
+             a.time_in, a.time_out, a.students_present, a.geo_verified
       FROM attendance a
       LEFT JOIN resources r ON r.id = a.facilitator_id
       LEFT JOIN beneficiaries b ON b.id = a.beneficiary_id

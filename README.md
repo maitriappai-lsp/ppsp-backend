@@ -6,8 +6,9 @@ spec). This replaces the AsyncStorage mock in `maitri-lsp-app/src/data/store.js`
 ## What it does
 
 - Serves the entire app's data (`GET /api/db`) in the exact shape the client
-  already expects (`{ resources, beneficiaries, categories, geo, schedule,
-  psr, uploads, content, overrides, systemParameters }`), so the client
+  already expects (one key per table in `src/routes/tables.js` -- resources,
+  beneficiaries, categories, geo, attendance, uploads, content and the PPSP
+  tables -- plus overrides and systemParameters), so the client
   swap is just "fetch instead of AsyncStorage."
 - Generic CRUD for every master/transaction table (`POST/PATCH/DELETE
   /api/:table/:id`) -- the client still generates its own record ids
@@ -33,7 +34,7 @@ spec). This replaces the AsyncStorage mock in `maitri-lsp-app/src/data/store.js`
   check is bypassed).
 - Role-based authorization is minimal right now (a valid token is required,
   but any authenticated user can hit any endpoint). Add a
-  `requireRole('Admin')` middleware for the Admin-only Masters/Schedule/
+  `requireRole('Admin')` middleware for the Admin-only Masters/
   Override endpoints before this goes anywhere near production data.
 - Rate limiting / login throttling on `/api/auth/login`.
 
@@ -81,7 +82,7 @@ server is reachable from your phone/emulator:
 | POST | `/api/auth/login` | `{ phone, password }` -> `{ ok, user, token }` |
 | POST | `/api/auth/change-password` | `{ resourceId, newPassword }` |
 | GET | `/api/db` | Everything, in one call. Requires `Authorization: Bearer <token>` |
-| POST | `/api/:table` | `:table` is one of resources/beneficiaries/categories/geo/schedule/psr/uploads/content |
+| POST | `/api/:table` | `:table` is any key in `TABLES` (`src/routes/tables.js`), e.g. resources, beneficiaries, materialMaster, allocations, dsr |
 | PATCH | `/api/:table/:id` | Partial update |
 | DELETE | `/api/:table/:id` | |
 | POST | `/api/overrides` | `{ resourceId, bypassGeofence, bypassFace, reason, loggedBy }` -- id + timestamp are server-assigned |

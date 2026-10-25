@@ -47,12 +47,6 @@ app.get('/api/db', async (req, res, next) => {
 
     res.json({
       ...data,
-      // TEMPORARY: Schedule and Sessions (psr) no longer exist in PPSP, but
-      // the Sessions screens/dashboard tabs haven't been taken out of the
-      // app yet and still read db.schedule / db.psr. Empty arrays keep them
-      // from crashing. Delete these two lines once those screens are gone.
-      schedule: [],
-      psr: [],
       overrides: overrideRows.map(rowToRecord),
       systemParameters: spRows[0] ? rowToRecord(spRows[0]) : null,
     });
