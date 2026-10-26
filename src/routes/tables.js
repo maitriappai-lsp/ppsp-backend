@@ -70,8 +70,16 @@ async function fetchTable(clientTable) {
   return rows.map((r) => scrub(clientTable, rowToRecord(r)));
 }
 
+// A facilitator's DSR must go through POST /api/dsr/save, which enforces
+// "one submit per day, no edits after submit". These two tables are therefore
+// read-only through the generic routes for everyone except the Admin.
+const ADMIN_WRITE_ONLY = new Set(['dsr', 'dsrDetail']);
+
 router.param('table', (req, res, next, table) => {
   if (!sqlTable(table)) return res.status(404).json({ error: `Unknown table "${table}"` });
+  if (req.method !== 'GET' && ADMIN_WRITE_ONLY.has(table) && req.user?.role !== 'Admin') {
+    return res.status(403).json({ error: 'DSRs are saved from the DSR screen.' });
+  }
   next();
 });
 

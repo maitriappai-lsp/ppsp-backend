@@ -11,6 +11,7 @@ const filesRouter = require('./routes/files');
 const exportRouter = require('./routes/export');
 const importRouter = require('./routes/import');
 const attendanceOpenRouter = require('./routes/attendanceOpen');
+const dsrRouter = require('./routes/dsr');
 const { rowToRecord } = require('./caseConvert');
 
 const app = express();
@@ -63,6 +64,7 @@ app.use('/api/files', filesRouter);
 app.use('/api/export', exportRouter);
 app.use('/api/import', importRouter);
 app.use('/api/attendance-open', attendanceOpenRouter);
+app.use('/api/dsr', dsrRouter); // facilitator DSR save/submit (must come before the generic table routes)
 app.use('/api', tablesRouter);
 
 app.use((err, req, res, next) => {
