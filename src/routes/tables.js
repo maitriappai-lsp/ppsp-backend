@@ -51,6 +51,47 @@ const TABLES = {
   auditCategories: 'audit_category_master', // id = the category number, e.g. '2.13'
 };
 
+// Tables a Facilitator may write, but ONLY for the beneficiary they are
+// actively allocated to (their own student list, stock and book stock). The
+// value is the column that records who last changed the row; for a
+// facilitator the server fills it in from the login so it can't be faked.
+// Admins are not restricted. (stockUpdate / bookUpdate screens come next.)
+const OWN_BENEFICIARY_STAMP = {
+  studentMaster: 'updatedBy',
+  stockUpdate: 'lastUpdatedBy',
+  bookUpdate: 'lastUpdatedBy',
+};
+
+async function ownBeneficiaryId(userId) {
+  const { rows } = await pool.query(
+    `SELECT beneficiary_id FROM beneficiary_resource_allocation
+      WHERE active AND (resource1_id = $1 OR resource2_id = $1) LIMIT 1`,
+    [userId]
+  );
+  return rows[0] ? rows[0].beneficiary_id : null;
+}
+
+// Returns an error message if this write isn't allowed, else null.
+async function ownBeneficiaryCheck(req, clientTable, { record, patch, id }) {
+  if (req.user?.role !== 'Facilitator' || !OWN_BENEFICIARY_STAMP[clientTable]) return null;
+  const mine = await ownBeneficiaryId(req.user.sub);
+  if (!mine) return "You aren't assigned to a beneficiary yet. Ask your admin to allocate you.";
+  const msg = 'You can only change records for your own assigned beneficiary.';
+  if (record && record.beneficiaryId !== mine) return msg;
+  if (patch && patch.beneficiaryId !== undefined && patch.beneficiaryId !== mine) return msg;
+  if (id) {
+    const { rows } = await pool.query(`SELECT beneficiary_id FROM ${sqlTable(clientTable)} WHERE id = $1`, [id]);
+    if (rows.length && rows[0].beneficiary_id !== mine) return msg;
+  }
+  return null;
+}
+
+function stampFacilitator(req, clientTable, obj) {
+  const column = OWN_BENEFICIARY_STAMP[clientTable];
+  if (req.user?.role !== 'Facilitator' || !column) return obj;
+  return { ...obj, [column]: req.user.sub };
+}
+
 function sqlTable(clientTable) {
   return TABLES[clientTable] || null;
 }
@@ -163,6 +204,10 @@ router.post('/:table', async (req, res, next) => {
 
     if (!record.id) return res.status(400).json({ error: 'record.id is required' });
 
+    const ownError = await ownBeneficiaryCheck(req, clientTable, { record });
+    if (ownError) return res.status(403).json({ error: ownError });
+    record = stampFacilitator(req, clientTable, record);
+
     // Write rules (currently: no overlapping attendance check-ins) -- see scheduleRules.js.
     const ruleError = await checkWriteRules(pool, clientTable, record, { creating: true });
     if (ruleError) return res.status(409).json({ error: ruleError });
@@ -231,6 +276,10 @@ router.patch('/:table/:id', async (req, res, next) => {
     let patch = { ...req.body };
     delete patch.id; // id is not patchable
 
+    const ownError = await ownBeneficiaryCheck(req, clientTable, { patch, id: req.params.id });
+    if (ownError) return res.status(403).json({ error: ownError });
+    patch = stampFacilitator(req, clientTable, patch);
+
     if (clientTable === 'resources' && patch.password) {
       patch.passwordHash = await bcrypt.hash(patch.password, 10);
       delete patch.password;
@@ -259,6 +308,8 @@ router.patch('/:table/:id', async (req, res, next) => {
 // DELETE /api/:table/:id
 router.delete('/:table/:id', async (req, res, next) => {
   try {
+    const ownError = await ownBeneficiaryCheck(req, req.params.table, { id: req.params.id });
+    if (ownError) return res.status(403).json({ error: ownError });
     const table = sqlTable(req.params.table);
     const { rowCount } = await pool.query(`DELETE FROM ${table} WHERE id = $1`, [req.params.id]);
     if (rowCount === 0) return res.status(404).json({ error: 'Not found' });
