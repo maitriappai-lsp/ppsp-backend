@@ -129,6 +129,15 @@ router.get('/table/:table', async (req, res, next) => {
       return rec;
     });
 
+    // A DSR's EPL materials are stored as material ids; export their names.
+    if (req.params.table === 'dsr' && records.length > 0) {
+      const { rows: mats } = await pool.query('SELECT id, name, type FROM material_master');
+      const byId = Object.fromEntries(mats.map((m) => [m.id, m.name + (m.type ? ` (${m.type})` : '')]));
+      records.forEach((r) => {
+        r.eplMaterialsUsed = (r.eplMaterialsUsed || []).map((id) => byId[id] || id);
+      });
+    }
+
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet(req.params.table.slice(0, 31));
     const keys = records.length > 0 ? Object.keys(records[0]) : [];

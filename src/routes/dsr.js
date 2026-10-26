@@ -10,14 +10,15 @@
 //   * Only a Facilitator files a DSR, and always as THEMSELVES -- the resource
 //     is taken from the login token, never from the request.
 //   * Only for TODAY (in APP_TIMEZONE, default Asia/Kolkata).
-//   * The beneficiary is whichever one the facilitator is actively allocated
-//     to; no allocation, no DSR.
+//   * The beneficiary is chosen by the facilitator (the app defaults it to
+//     where they checked in today), so covering another beneficiary is fine.
 //   * Any number of SAVEs while it is a Draft (each one replaces the previous
 //     draft's contents) but only ONE SUBMIT: once Submitted, further saves
 //     are refused. The database also guarantees one DSR per facilitator per
 //     day, and that a submitted DSR is complete.
-//   * Students must be on that beneficiary's list; an activity must be one of
-//     the chosen material's activities.
+//   * Every material line needs at least one student, and each student must be
+//     on the chosen beneficiary's list; an activity must be one of the chosen
+//     material's activities; EPL materials must be in the EPL category.
 //
 // Admins edit DSRs from the admin dashboard through the generic table routes
 // (routes/tables.js); those are closed to facilitators.
@@ -91,7 +92,7 @@ router.post('/save', async (req, res, next) => {
       bookRag: ragOrNull(header.bookRag, 'Book RAG rating'),
       overallRag: ragOrNull(header.overallRag, 'Overall day RAG rating'),
       circleTime: [],
-      eplMaterialsUsed: textOrNull(header.eplMaterialsUsed),
+      eplMaterialsUsed: [],
       remarks: textOrNull(header.remarks),
     };
     const picked = Array.isArray(header.circleTimeActivities) ? header.circleTimeActivities : [];
@@ -111,16 +112,21 @@ router.post('/save', async (req, res, next) => {
       if (missing.length) throw new HttpError(400, `Please fill in: ${missing.join(', ')}.`);
     }
 
-    // ---- who / which beneficiary --------------------------------------
-    const alloc = await client.query(
-      `SELECT beneficiary_id FROM beneficiary_resource_allocation
-        WHERE active AND (resource1_id = $1 OR resource2_id = $1) LIMIT 1`,
-      [me]
-    );
-    if (!alloc.rows.length) {
-      throw new HttpError(400, "You aren't assigned to a beneficiary yet. Ask your admin to allocate you.");
+    // ---- beneficiary + EPL materials ---------------------------------
+    const beneficiaryId = textOrNull(header.beneficiaryId);
+    if (!beneficiaryId) throw new HttpError(400, 'Choose the beneficiary.');
+    const ben = await client.query('SELECT 1 FROM beneficiaries WHERE id = $1', [beneficiaryId]);
+    if (!ben.rows.length) throw new HttpError(400, "That beneficiary doesn't exist.");
+
+    const eplPicked = Array.isArray(header.eplMaterialsUsed) ? [...new Set(header.eplMaterialsUsed)] : [];
+    if (eplPicked.length) {
+      const epl = await client.query(
+        "SELECT id FROM material_master WHERE id = ANY($1::text[]) AND LOWER(TRIM(category)) = 'epl'",
+        [eplPicked]
+      );
+      if (epl.rows.length !== eplPicked.length) throw new HttpError(400, "One of the EPL materials isn't in the EPL category.");
     }
-    const beneficiaryId = alloc.rows[0].beneficiary_id;
+    h.eplMaterialsUsed = eplPicked;
 
     // ---- lines ---------------------------------------------------------
     const materialIds = [...new Set(lines.map((l) => l.materialId).filter(Boolean))];
@@ -133,13 +139,14 @@ router.post('/save', async (req, res, next) => {
     if (allStudentIds.length) {
       const s = await client.query('SELECT id FROM student_master WHERE id = ANY($1::text[]) AND beneficiary_id = $2', [allStudentIds, beneficiaryId]);
       if (s.rows.length !== allStudentIds.length) {
-        throw new HttpError(400, "One of the students isn't on your beneficiary's student list.");
+        throw new HttpError(400, "One of the students isn't on the chosen beneficiary's student list.");
       }
     }
     const cleanLines = lines.map((l, i) => {
       const n = i + 1;
       if (!l.materialId || !materials[l.materialId]) throw new HttpError(400, `Line ${n}: choose a material.`);
       if (!['M', 'A'].includes(l.sessionPeriod)) throw new HttpError(400, `Line ${n}: choose Morning or Afternoon.`);
+      if (!Array.isArray(l.studentIds) || l.studentIds.length === 0) throw new HttpError(400, `Line ${n}: choose at least one student.`);
       const activity = textOrNull(l.materialActivity);
       if (activity && !materials[l.materialId].includes(activity)) {
         throw new HttpError(400, `Line ${n}: "${activity}" isn't one of that material's activities.`);

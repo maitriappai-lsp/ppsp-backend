@@ -346,7 +346,7 @@ CREATE TABLE IF NOT EXISTS dsr_header (
   -- multi-select: Story book / Good habits / Zero activity & other
   -- presentation / Correction details / Material name game / Others
   circle_time_activities     TEXT[] NOT NULL DEFAULT '{}',
-  epl_materials_used         TEXT,
+  epl_materials_used         TEXT[] NOT NULL DEFAULT '{}',   -- ids of the EPL-category materials used
   remarks                    TEXT,                       -- optional
   status                     TEXT NOT NULL DEFAULT 'Draft' CHECK (status IN ('Draft', 'Submitted')),
   submitted_at               TIMESTAMPTZ,
@@ -384,6 +384,21 @@ BEGIN
     ALTER TABLE dsr_header RENAME COLUMN active_children_1230_2pm TO children_afternoon;
   END IF;
 END $$;
+
+-- EPL materials used was free text in the first version of this file; it is
+-- now a list of material ids (material_master rows whose category is EPL).
+-- Converting an existing column discards any old free-text value (it can't be
+-- matched to a material). A no-op on a fresh database.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'dsr_header' AND column_name = 'epl_materials_used' AND data_type = 'text') THEN
+    ALTER TABLE dsr_header ALTER COLUMN epl_materials_used TYPE TEXT[] USING '{}'::text[];
+  END IF;
+END $$;
+ALTER TABLE dsr_header ALTER COLUMN epl_materials_used SET DEFAULT '{}';
+UPDATE dsr_header SET epl_materials_used = '{}' WHERE epl_materials_used IS NULL;
+ALTER TABLE dsr_header ALTER COLUMN epl_materials_used SET NOT NULL;
 
 -- Materials used during the day: one row per material / activity / period.
 CREATE TABLE IF NOT EXISTS dsr_detail (
