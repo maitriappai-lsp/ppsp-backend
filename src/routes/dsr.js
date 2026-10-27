@@ -15,6 +15,9 @@
 //     for up to DSR_MAX_BACKDATE_DAYS (default 3) days back, never the future.
 //     For those, the time the facilitator pressed Submit is kept as the
 //     submitted time.
+//   * Only for a beneficiary the facilitator has an ATTENDANCE record at on that
+//     day (they must have timed in there first) -- for an offline DSR uploaded
+//     later, the check is made against the DSR's own date.
 //   * The beneficiary is chosen by the facilitator (the app defaults it to
 //     where they checked in today), so covering another beneficiary is fine.
 //   * ONE DSR per facilitator, per beneficiary, per day (two resources can
@@ -150,6 +153,15 @@ router.post('/save', async (req, res, next) => {
     if (!beneficiaryId) throw new HttpError(400, 'Choose the beneficiary.');
     const ben = await client.query('SELECT 1 FROM beneficiaries WHERE id = $1', [beneficiaryId]);
     if (!ben.rows.length) throw new HttpError(400, "That beneficiary doesn't exist.");
+
+    // Attendance first: a DSR needs a time-in record at THIS beneficiary that day.
+    const attended = await client.query(
+      'SELECT 1 FROM attendance WHERE facilitator_id = $1 AND date = $2 AND beneficiary_id = $3 LIMIT 1',
+      [me, date, beneficiaryId]
+    );
+    if (!attended.rows.length) {
+      throw new HttpError(400, "You can only file a DSR for a beneficiary you've marked attendance at on that day. Mark your time in there on the Attendance screen first.");
+    }
 
     const eplPicked = Array.isArray(header.eplMaterialsUsed) ? [...new Set(header.eplMaterialsUsed)] : [];
     if (eplPicked.length) {
