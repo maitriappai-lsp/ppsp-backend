@@ -352,7 +352,7 @@ CREATE TABLE IF NOT EXISTS dsr_header (
   submitted_at               TIMESTAMPTZ,
   created_at                 TIMESTAMPTZ DEFAULT now(),
   updated_at                 TIMESTAMPTZ DEFAULT now(),
-  CONSTRAINT dsr_one_per_resource_per_day UNIQUE (resource_id, dsr_date),
+  CONSTRAINT dsr_one_per_resource_beneficiary_day UNIQUE (resource_id, dsr_date, beneficiary_id),
   CONSTRAINT dsr_submitted_is_complete CHECK (
     status <> 'Submitted' OR (
       submitted_at IS NOT NULL
@@ -382,6 +382,20 @@ BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns
              WHERE table_name = 'dsr_header' AND column_name = 'active_children_1230_2pm') THEN
     ALTER TABLE dsr_header RENAME COLUMN active_children_1230_2pm TO children_afternoon;
+  END IF;
+END $$;
+
+-- One DSR per facilitator, per beneficiary, per day (two resources can share a
+-- beneficiary, and one resource can cover several beneficiaries in a day).
+-- The first version of this file allowed one per facilitator per day; swap
+-- the old rule for the new one. A no-op on a fresh database.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dsr_one_per_resource_per_day') THEN
+    ALTER TABLE dsr_header DROP CONSTRAINT dsr_one_per_resource_per_day;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dsr_one_per_resource_beneficiary_day') THEN
+    ALTER TABLE dsr_header ADD CONSTRAINT dsr_one_per_resource_beneficiary_day UNIQUE (resource_id, dsr_date, beneficiary_id);
   END IF;
 END $$;
 

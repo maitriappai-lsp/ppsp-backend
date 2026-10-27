@@ -147,7 +147,7 @@ function friendlyDuplicateMessage(constraintName, err) {
     allocation_active_resource2_unique: 'That resource is already in another active allocation. Make that one inactive first.',
     stock_update_beneficiary_material_unique: 'Stock for this material already exists for this beneficiary -- edit that row instead.',
     book_update_beneficiary_book_unique: 'This book already exists for this beneficiary -- edit that row instead.',
-    dsr_one_per_resource_per_day: 'A DSR already exists for this resource on this date.',
+    dsr_one_per_resource_beneficiary_day: 'A DSR already exists for this resource, beneficiary and date.',
     audit_visit_number_per_beneficiary: 'That visit number already exists for this beneficiary.',
     audit_detail_audit_category_unique: 'This audit already has an answer for that checklist item.',
     audit_category_master_pkey: 'That category number already exists.',

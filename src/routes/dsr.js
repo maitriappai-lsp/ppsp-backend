@@ -9,13 +9,21 @@
 // Rules enforced here (not just in the app):
 //   * Only a Facilitator files a DSR, and always as THEMSELVES -- the resource
 //     is taken from the login token, never from the request.
-//   * Only for TODAY (in APP_TIMEZONE, default Asia/Kolkata).
+//   * Only for TODAY (in APP_TIMEZONE, default Asia/Kolkata) -- with one
+//     exception: a DSR written on the phone while OFFLINE is uploaded later,
+//     possibly after midnight, so a save marked `offlineQueued` is accepted
+//     for up to DSR_MAX_BACKDATE_DAYS (default 3) days back, never the future.
+//     For those, the time the facilitator pressed Submit is kept as the
+//     submitted time.
 //   * The beneficiary is chosen by the facilitator (the app defaults it to
 //     where they checked in today), so covering another beneficiary is fine.
-//   * Any number of SAVEs while it is a Draft (each one replaces the previous
-//     draft's contents) but only ONE SUBMIT: once Submitted, further saves
-//     are refused. The database also guarantees one DSR per facilitator per
-//     day, and that a submitted DSR is complete.
+//   * ONE DSR per facilitator, per beneficiary, per day (two resources can
+//     share a beneficiary; one resource can cover several in a day). Any number
+//     of SAVEs while it is a Draft (each one replaces the previous draft's
+//     contents) but only ONE SUBMIT: once Submitted, further saves are
+//     refused. Repeating a save is harmless, which is what lets the phone
+//     safely retry an upload. The database also guarantees the one-per-day
+//     rule, and that a submitted DSR is complete.
 //   * Every material line needs at least one student, and each student must be
 //     on the chosen beneficiary's list; an activity must be one of the chosen
 //     material's activities; EPL materials must be in the EPL category.
@@ -52,6 +60,24 @@ function todayInAppTimezone() {
   return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 }
 
+const MAX_BACKDATE_DAYS = Number(process.env.DSR_MAX_BACKDATE_DAYS || 3);
+
+// 'YYYY-MM-DD' plus/minus whole days.
+function shiftDate(ymd, days) {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// The phone's own "submitted at" time for an offline DSR, if it is believable
+// (not in the future, not older than the backdate window); otherwise now.
+function clientTimeOrNow(value) {
+  const t = Date.parse(value);
+  const now = Date.now();
+  if (!Number.isFinite(t) || t > now || now - t > (MAX_BACKDATE_DAYS + 1) * 86400000) return new Date();
+  return new Date(t);
+}
+
 function textOrNull(v) {
   const s = String(v ?? '').trim();
   return s ? s : null;
@@ -77,9 +103,16 @@ router.post('/save', async (req, res, next) => {
       throw new HttpError(403, 'Only facilitators file a DSR from here. Admins edit DSRs from the dashboard.');
     }
     const me = req.user.sub;
-    const { date, submit = false, header = {}, lines = [] } = req.body || {};
+    const { date, submit = false, header = {}, lines = [], offlineQueued = false, submittedAt: clientSubmittedAt } = req.body || {};
 
-    if (date !== todayInAppTimezone()) throw new HttpError(400, 'A DSR can only be filed for today.');
+    const today = todayInAppTimezone();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) throw new HttpError(400, 'The DSR date is missing.');
+    if (date !== today) {
+      if (!offlineQueued) throw new HttpError(400, 'A DSR can only be filed for today.');
+      if (date > today || date < shiftDate(today, -MAX_BACKDATE_DAYS)) {
+        throw new HttpError(400, `This DSR (${date}) is too old to upload from the app. Ask your admin to enter it.`);
+      }
+    }
     if (!Array.isArray(lines)) throw new HttpError(400, 'Lines must be a list.');
 
     // ---- header values ------------------------------------------------
@@ -156,13 +189,16 @@ router.post('/save', async (req, res, next) => {
 
     // ---- write ---------------------------------------------------------
     await client.query('BEGIN');
-    const existing = await client.query('SELECT id, status FROM dsr_header WHERE resource_id = $1 AND dsr_date = $2 FOR UPDATE', [me, date]);
+    const existing = await client.query(
+      'SELECT id, status FROM dsr_header WHERE resource_id = $1 AND dsr_date = $2 AND beneficiary_id = $3 FOR UPDATE',
+      [me, date, beneficiaryId]
+    );
     if (existing.rows[0] && existing.rows[0].status === 'Submitted') {
-      throw new HttpError(409, "Today's DSR has already been submitted and can't be changed.");
+      throw new HttpError(409, 'This DSR has already been submitted and can\'t be changed.');
     }
     const status = submit ? 'Submitted' : 'Draft';
-    const submittedAt = submit ? new Date() : null;
-    const dsrId = existing.rows[0] ? existing.rows[0].id : `DSR-${date.replace(/-/g, '')}-${me}`;
+    const submittedAt = submit ? (offlineQueued ? clientTimeOrNow(clientSubmittedAt) : new Date()) : null;
+    const dsrId = existing.rows[0] ? existing.rows[0].id : `DSR-${date.replace(/-/g, '')}-${me}-${beneficiaryId}`;
 
     const values = [
       beneficiaryId, h.timeIn, h.childrenMorning, h.childrenAfternoon, h.stockRag, h.stockRemarks,
@@ -204,7 +240,7 @@ router.post('/save', async (req, res, next) => {
     await client.query('ROLLBACK').catch(() => {});
     if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
     if (err.code === '23505') {
-      return res.status(409).json({ error: 'A DSR for today already exists. Reload the screen and try again.' });
+      return res.status(409).json({ error: 'A DSR for this beneficiary and day already exists. Reload the screen and try again.' });
     }
     if (err.code === '23514') {
       return res.status(400).json({ error: 'A submitted DSR needs time in, both child counts and all three RAG ratings.' });
