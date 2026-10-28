@@ -550,3 +550,26 @@ CREATE INDEX IF NOT EXISTS content_material_idx ON content (material_id);
 ALTER TABLE uploads ADD COLUMN IF NOT EXISTS material_id TEXT REFERENCES material_master(id) ON DELETE SET NULL;
 ALTER TABLE uploads DROP COLUMN IF EXISTS category_id;
 CREATE INDEX IF NOT EXISTS uploads_material_idx ON uploads (material_id);
+
+-- ---------------------------------------------------------------------------
+-- DSR approvals (the admin "override" for DSRs). The Admin gives a facilitator
+-- permission to file a DSR for ONE date at ONE beneficiary -- e.g. when they
+-- couldn't time in, or forgot to file on the day. With an active approval the
+-- "today only" and "needs attendance" rules are waived for that combination
+-- (never for a future date). It is used up once that DSR is submitted, and the
+-- Admin can switch it off (active = false) or delete it.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS dsr_override (
+  id              TEXT PRIMARY KEY,
+  resource_id     TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+  beneficiary_id  TEXT NOT NULL REFERENCES beneficiaries(id) ON DELETE CASCADE,
+  dsr_date        DATE NOT NULL,
+  reason          TEXT NOT NULL,
+  active          BOOLEAN NOT NULL DEFAULT TRUE,
+  granted_by      TEXT REFERENCES resources(id) ON DELETE SET NULL,
+  granted_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT dsr_override_unique UNIQUE (resource_id, dsr_date, beneficiary_id)
+);
+
+CREATE INDEX IF NOT EXISTS dsr_override_resource_date_idx ON dsr_override (resource_id, dsr_date);

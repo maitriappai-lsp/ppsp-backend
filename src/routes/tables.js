@@ -49,6 +49,7 @@ const TABLES = {
   audits: 'audit_header',
   auditDetail: 'audit_detail',
   auditCategories: 'audit_category_master', // id = the category number, e.g. '2.13'
+  dsrOverrides: 'dsr_override', // admin approvals to file a DSR for a date + beneficiary
 };
 
 // Tables a Facilitator may write, but ONLY for the beneficiary they are
@@ -112,9 +113,10 @@ async function fetchTable(clientTable) {
 }
 
 // A facilitator's DSR must go through POST /api/dsr/save, which enforces
-// "one submit per day, no edits after submit". These two tables are therefore
-// read-only through the generic routes for everyone except the Admin.
-const ADMIN_WRITE_ONLY = new Set(['dsr', 'dsrDetail']);
+// "one submit per day, no edits after submit"; and only the Admin may grant
+// the approvals that let a facilitator file for another date. These tables are
+// therefore read-only through the generic routes for everyone except the Admin.
+const ADMIN_WRITE_ONLY = new Set(['dsr', 'dsrDetail', 'dsrOverrides']);
 
 router.param('table', (req, res, next, table) => {
   if (!sqlTable(table)) return res.status(404).json({ error: `Unknown table "${table}"` });
@@ -151,6 +153,7 @@ function friendlyDuplicateMessage(constraintName, err) {
     audit_visit_number_per_beneficiary: 'That visit number already exists for this beneficiary.',
     audit_detail_audit_category_unique: 'This audit already has an answer for that checklist item.',
     audit_category_master_pkey: 'That category number already exists.',
+    dsr_override_unique: 'This facilitator already has an approval for that beneficiary and date.',
   };
   if (known[constraintName]) return known[constraintName];
   // The allocation trigger raises its own readable message.

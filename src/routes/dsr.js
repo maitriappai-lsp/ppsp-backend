@@ -9,8 +9,11 @@
 // Rules enforced here (not just in the app):
 //   * Only a Facilitator files a DSR, and always as THEMSELVES -- the resource
 //     is taken from the login token, never from the request.
-//   * Only for TODAY (in APP_TIMEZONE, default Asia/Kolkata) -- with one
-//     exception: a DSR written on the phone while OFFLINE is uploaded later,
+//   * Only for TODAY (in APP_TIMEZONE, default Asia/Kolkata) -- with two
+//     exceptions. (1) An ADMIN APPROVAL (dsr_override: this facilitator, this
+//     date, this beneficiary, set up in the admin Override screen) opens that one
+//     date for that one beneficiary, and also waives the attendance rule below;
+//     it can never be for a future date. (2) a DSR written on the phone while OFFLINE is uploaded later,
 //     possibly after midnight, so a save marked `offlineQueued` is accepted
 //     for up to DSR_MAX_BACKDATE_DAYS (default 3) days back, never the future.
 //     For those, the time the facilitator pressed Submit is kept as the
@@ -110,12 +113,6 @@ router.post('/save', async (req, res, next) => {
 
     const today = todayInAppTimezone();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) throw new HttpError(400, 'The DSR date is missing.');
-    if (date !== today) {
-      if (!offlineQueued) throw new HttpError(400, 'A DSR can only be filed for today.');
-      if (date > today || date < shiftDate(today, -MAX_BACKDATE_DAYS)) {
-        throw new HttpError(400, `This DSR (${date}) is too old to upload from the app. Ask your admin to enter it.`);
-      }
-    }
     if (!Array.isArray(lines)) throw new HttpError(400, 'Lines must be a list.');
 
     // ---- header values ------------------------------------------------
@@ -154,13 +151,36 @@ router.post('/save', async (req, res, next) => {
     const ben = await client.query('SELECT 1 FROM beneficiaries WHERE id = $1', [beneficiaryId]);
     if (!ben.rows.length) throw new HttpError(400, "That beneficiary doesn't exist.");
 
-    // Attendance first: a DSR needs a time-in record at THIS beneficiary that day.
-    const attended = await client.query(
-      'SELECT 1 FROM attendance WHERE facilitator_id = $1 AND date = $2 AND beneficiary_id = $3 LIMIT 1',
+    // ---- admin approval for this facilitator + date + beneficiary? -----
+    const approval = await client.query(
+      'SELECT 1 FROM dsr_override WHERE resource_id = $1 AND dsr_date = $2 AND beneficiary_id = $3 AND active LIMIT 1',
       [me, date, beneficiaryId]
     );
-    if (!attended.rows.length) {
-      throw new HttpError(400, "You can only file a DSR for a beneficiary you've marked attendance at on that day. Mark your time in there on the Attendance screen first.");
+    const approved = approval.rows.length > 0;
+
+    // ---- the date --------------------------------------------------------
+    if (date > today) throw new HttpError(400, "A DSR can't be filed for a future date.");
+    if (date !== today && !approved) {
+      if (!offlineQueued) {
+        throw new HttpError(400, 'A DSR can only be filed for today, unless your admin has approved another date for you.');
+      }
+      if (date < shiftDate(today, -MAX_BACKDATE_DAYS)) {
+        throw new HttpError(400, `This DSR (${date}) is too old to upload from the app. Ask your admin to approve it for you.`);
+      }
+    }
+
+    // ---- attendance first (waived by an approval) ------------------------
+    if (!approved) {
+      const attended = await client.query(
+        'SELECT 1 FROM attendance WHERE facilitator_id = $1 AND date = $2 AND beneficiary_id = $3 LIMIT 1',
+        [me, date, beneficiaryId]
+      );
+      if (!attended.rows.length) {
+        throw new HttpError(
+          400,
+          "You can only file a DSR for a beneficiary you've marked attendance at on that day. Mark your time in there on the Attendance screen first, or ask your admin to approve this DSR."
+        );
+      }
     }
 
     const eplPicked = Array.isArray(header.eplMaterialsUsed) ? [...new Set(header.eplMaterialsUsed)] : [];
