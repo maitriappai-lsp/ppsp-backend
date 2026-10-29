@@ -573,3 +573,37 @@ CREATE TABLE IF NOT EXISTS dsr_override (
 );
 
 CREATE INDEX IF NOT EXISTS dsr_override_resource_date_idx ON dsr_override (resource_id, dsr_date);
+
+-- ---------------------------------------------------------------------------
+-- Leave and permission requests. One table for both kinds (request_type):
+--   Leave      -- from leave_from to leave_to (whole days)
+--   Permission -- on permission_date, from permission_from to permission_to
+--                 (times are text like "10:30", the same as attendance times)
+-- A facilitator raises a request (Pending); the Admin approves or rejects it,
+-- and can also raise one on a resource's behalf. updated_by / updated_at record
+-- who last changed it and when. reason and admin_remarks are optional notes.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS leave_permission (
+  id               TEXT PRIMARY KEY,
+  resource_id      TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+  request_type     TEXT NOT NULL CHECK (request_type IN ('Leave', 'Permission')),
+  leave_from       DATE,
+  leave_to         DATE,
+  permission_date  DATE,
+  permission_from  TEXT,
+  permission_to    TEXT,
+  reason           TEXT,
+  status           TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Approved', 'Rejected')),
+  admin_remarks    TEXT,
+  updated_by       TEXT REFERENCES resources(id) ON DELETE SET NULL,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT leave_permission_leave_ok CHECK (
+    request_type <> 'Leave' OR (leave_from IS NOT NULL AND leave_to IS NOT NULL AND leave_to >= leave_from)
+  ),
+  CONSTRAINT leave_permission_permission_ok CHECK (
+    request_type <> 'Permission' OR (permission_date IS NOT NULL AND permission_from IS NOT NULL AND permission_to IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS leave_permission_resource_idx ON leave_permission (resource_id, status);

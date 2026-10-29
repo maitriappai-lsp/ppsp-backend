@@ -20,7 +20,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
 const { recordToRow, rowToRecord } = require('../caseConvert');
-const { checkWriteRules } = require('../scheduleRules');
+const { checkWriteRules, timeToMinutes } = require('../scheduleRules');
 
 const router = express.Router({ mergeParams: true });
 
@@ -50,6 +50,7 @@ const TABLES = {
   auditDetail: 'audit_detail',
   auditCategories: 'audit_category_master', // id = the category number, e.g. '2.13'
   dsrOverrides: 'dsr_override', // admin approvals to file a DSR for a date + beneficiary
+  leaveRequests: 'leave_permission', // leave and permission requests
 };
 
 // Tables a Facilitator may write, but ONLY for the beneficiary they are
@@ -93,6 +94,83 @@ function stampFacilitator(req, clientTable, obj) {
   return { ...obj, [column]: req.user.sub };
 }
 
+// ---- Leave and permission requests -----------------------------------------
+// A facilitator may see, add, change and withdraw only THEIR OWN requests, and
+// only while they are still Pending; they can't set a status or an admin
+// remark. The Admin can do all of it for anyone (including raising a request on
+// a resource's behalf and approving or rejecting). The server always records
+// who made the change and when.
+
+const LEAVE_TYPES = ['Leave', 'Permission'];
+const LEAVE_STATUSES = ['Pending', 'Approved', 'Rejected'];
+
+function validateLeave(rec) {
+  if (!rec.resourceId) return 'Choose the resource.';
+  if (!LEAVE_TYPES.includes(rec.requestType)) return 'Choose Leave or Permission.';
+  if (!LEAVE_STATUSES.includes(rec.status)) return 'Status must be Pending, Approved or Rejected.';
+  if (rec.requestType === 'Leave') {
+    if (!rec.leaveFrom || !rec.leaveTo) return 'Give the leave from and to dates.';
+    if (rec.leaveTo < rec.leaveFrom) return "The leave to date can't be before the from date.";
+  } else {
+    if (!rec.permissionDate || !rec.permissionFrom || !rec.permissionTo) return 'Give the permission date and the from and to times.';
+    const from = timeToMinutes(rec.permissionFrom);
+    const to = timeToMinutes(rec.permissionTo);
+    if (from === null || to === null) return 'Enter the permission times like 10:30.';
+    if (to <= from) return 'The permission end time must be after the start time.';
+  }
+  return null;
+}
+
+// Returns { error, status } to refuse, or { record } / { patch } with the values
+// to save, or {} to carry on unchanged.
+async function leaveWriteRules(req, { record, patch, id, deleting }) {
+  const isAdmin = req.user?.role === 'Admin';
+  const stamp = { updatedBy: req.user.sub, updatedAt: new Date().toISOString() };
+  // a Leave carries no permission fields and vice versa
+  const clearOther = (rec) =>
+    rec.requestType === 'Leave'
+      ? { permissionDate: null, permissionFrom: null, permissionTo: null }
+      : rec.requestType === 'Permission'
+        ? { leaveFrom: null, leaveTo: null }
+        : {};
+
+  if (record) {
+    let rec = { status: 'Pending', ...record };
+    if (!isAdmin) rec = { ...rec, resourceId: req.user.sub, status: 'Pending', adminRemarks: null };
+    rec = { ...rec, ...clearOther(rec), ...stamp };
+    const error = validateLeave(rec);
+    return error ? { error, status: 400 } : { record: rec };
+  }
+
+  const { rows } = await pool.query('SELECT * FROM leave_permission WHERE id = $1', [id]);
+  if (!rows.length) return {}; // the normal route answers "not found"
+  const current = rowToRecord(rows[0]);
+  if (!isAdmin) {
+    if (current.resourceId !== req.user.sub) return { error: 'You can only change your own requests.', status: 403 };
+    if (current.status !== 'Pending') {
+      return { error: `This request has already been ${current.status.toLowerCase()} and can't be changed.`, status: 409 };
+    }
+  }
+  if (deleting) return {};
+
+  let p = { ...patch };
+  if (!isAdmin) {
+    delete p.status;
+    delete p.resourceId;
+    delete p.adminRemarks;
+  }
+  const merged = { ...current, ...p };
+  p = { ...p, ...clearOther(merged), ...stamp };
+  const error = validateLeave({ ...merged, ...p });
+  return error ? { error, status: 400 } : { patch: p };
+}
+
+// Facilitators only ever receive their own leave requests.
+function visibleTo(req, clientTable, rows) {
+  if (clientTable === 'leaveRequests' && req.user?.role !== 'Admin') return rows.filter((r) => r.resourceId === req.user.sub);
+  return rows;
+}
+
 function sqlTable(clientTable) {
   return TABLES[clientTable] || null;
 }
@@ -130,7 +208,7 @@ router.param('table', (req, res, next, table) => {
 // normally loads everything at once via GET /api/db).
 router.get('/:table', async (req, res, next) => {
   try {
-    res.json(await fetchTable(req.params.table));
+    res.json(visibleTo(req, req.params.table, await fetchTable(req.params.table)));
   } catch (err) {
     next(err);
   }
@@ -167,6 +245,8 @@ function friendlyCheckMessage(constraintName) {
     allocation_distinct_resources: 'Resource 1 and Resource 2 must be different people.',
     audit_distinct_facilitators: 'Facilitator 1 and Facilitator 2 must be different people.',
     audit_submitted_has_timestamp: 'A submitted audit needs a submitted time.',
+    leave_permission_leave_ok: "For a leave, give the from and to dates; the to date can't be before the from date.",
+    leave_permission_permission_ok: 'For a permission, give the date and the from and to times.',
   };
   return known[constraintName] || 'A value is out of range, or a required field is missing.';
 }
@@ -210,6 +290,12 @@ router.post('/:table', async (req, res, next) => {
     const ownError = await ownBeneficiaryCheck(req, clientTable, { record });
     if (ownError) return res.status(403).json({ error: ownError });
     record = stampFacilitator(req, clientTable, record);
+
+    if (clientTable === 'leaveRequests') {
+      const rules = await leaveWriteRules(req, { record });
+      if (rules.error) return res.status(rules.status).json({ error: rules.error });
+      record = rules.record;
+    }
 
     // Write rules (currently: no overlapping attendance check-ins) -- see scheduleRules.js.
     const ruleError = await checkWriteRules(pool, clientTable, record, { creating: true });
@@ -283,6 +369,12 @@ router.patch('/:table/:id', async (req, res, next) => {
     if (ownError) return res.status(403).json({ error: ownError });
     patch = stampFacilitator(req, clientTable, patch);
 
+    if (clientTable === 'leaveRequests') {
+      const rules = await leaveWriteRules(req, { patch, id: req.params.id });
+      if (rules.error) return res.status(rules.status).json({ error: rules.error });
+      if (rules.patch) patch = rules.patch;
+    }
+
     if (clientTable === 'resources' && patch.password) {
       patch.passwordHash = await bcrypt.hash(patch.password, 10);
       delete patch.password;
@@ -313,6 +405,10 @@ router.delete('/:table/:id', async (req, res, next) => {
   try {
     const ownError = await ownBeneficiaryCheck(req, req.params.table, { id: req.params.id });
     if (ownError) return res.status(403).json({ error: ownError });
+    if (req.params.table === 'leaveRequests') {
+      const rules = await leaveWriteRules(req, { id: req.params.id, deleting: true });
+      if (rules.error) return res.status(rules.status).json({ error: rules.error });
+    }
     const table = sqlTable(req.params.table);
     const { rowCount } = await pool.query(`DELETE FROM ${table} WHERE id = $1`, [req.params.id]);
     if (rowCount === 0) return res.status(404).json({ error: 'Not found' });

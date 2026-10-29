@@ -43,6 +43,10 @@ app.get('/api/db', async (req, res, next) => {
     keys.forEach((k, i) => {
       data[k] = tables[i];
     });
+    // A facilitator only receives their own leave and permission requests.
+    if (req.user?.role !== 'Admin') {
+      data.leaveRequests = (data.leaveRequests || []).filter((r) => r.resourceId === req.user.sub);
+    }
     const { rows: overrideRows } = await pool.query('SELECT * FROM overrides ORDER BY timestamp DESC');
     const { rows: spRows } = await pool.query('SELECT * FROM system_parameters LIMIT 1');
     // Which students worked on each DSR line (read-only here; written by the DSR screens).
