@@ -20,6 +20,15 @@
 //                  Parent Name (optional), Parent Contact (optional)
 //   bookMaster:    Title, Language, Classification, Author (optional),
 //                  Book ID (optional)
+//   stockUpdate:   Material ID (or Material Category + Material Name + Material
+//                  Type), Qty, Status, Remarks, Beneficiary ID (admin only)
+//   bookUpdate:    Book ID (or Title [+ Language]), Qty, Status, Remarks,
+//                  Beneficiary ID (admin only)
+//
+// WHO MAY IMPORT: an Admin can import into any table here. A Facilitator can
+// import only students, stock and book stock, and only for their OWN assigned
+// beneficiary (the sheet needs no Beneficiary column; if it has one it must be
+// their own).
 // ---------------------------------------------------------------------------
 const express = require('express');
 const multer = require('multer');
@@ -286,7 +295,15 @@ async function importStudentMaster(rows, ctx = {}) {
 
     // Beneficiary: by Beneficiary ID, else by School / Class / Section.
     let beneficiaryId = pick(r, 'beneficiary id');
-    if (beneficiaryId) {
+    if (ctx.fixedBeneficiaryId) {
+      // a facilitator can only add to their own beneficiary
+      if (beneficiaryId && beneficiaryId !== ctx.fixedBeneficiaryId) {
+        result.skipped++;
+        result.errors.push(`Row ${i + 2}: you can only import students for your own beneficiary.`);
+        continue;
+      }
+      beneficiaryId = ctx.fixedBeneficiaryId;
+    } else if (beneficiaryId) {
       const b = await pool.query('SELECT id FROM beneficiaries WHERE id=$1', [beneficiaryId]);
       if (!b.rows.length) {
         result.skipped++;
@@ -324,12 +341,17 @@ async function importStudentMaster(rows, ctx = {}) {
     const givenId = pick(r, 'student id');
 
     const existing = givenId
-      ? await pool.query('SELECT id FROM student_master WHERE id=$1', [givenId])
+      ? await pool.query('SELECT id, beneficiary_id FROM student_master WHERE id=$1', [givenId])
       : await pool.query('SELECT id FROM student_master WHERE beneficiary_id=$1 AND LOWER(name)=LOWER($2)', [
           beneficiaryId,
           name,
         ]);
     if (existing.rows.length) {
+      if (ctx.fixedBeneficiaryId && existing.rows[0].beneficiary_id && existing.rows[0].beneficiary_id !== ctx.fixedBeneficiaryId) {
+        result.skipped++;
+        result.errors.push(`Row ${i + 2}: Student ID ${givenId} belongs to another beneficiary.`);
+        continue;
+      }
       await pool.query(
         `UPDATE student_master SET beneficiary_id=$1, name=$2, joined_date=$3, parent_name=$4,
          parent_contact=$5, updated_by=$6, updated_at=now() WHERE id=$7`,
@@ -397,6 +419,173 @@ async function importBookMaster(rows) {
   return result;
 }
 
+// ---- Stock and book stock (facilitator: own beneficiary; admin: any) ------
+
+// The beneficiary a stock/book row is for. A facilitator is pinned to their own
+// (a Beneficiary ID in the sheet must match it); an admin must give one.
+async function resolveStockBeneficiary(r, ctx, rowNo, result) {
+  const given = pick(r, 'beneficiary id');
+  if (ctx.fixedBeneficiaryId) {
+    if (given && given !== ctx.fixedBeneficiaryId) {
+      result.skipped++;
+      result.errors.push(`Row ${rowNo}: you can only import for your own beneficiary.`);
+      return null;
+    }
+    return ctx.fixedBeneficiaryId;
+  }
+  if (!given) {
+    result.skipped++;
+    result.errors.push(`Row ${rowNo}: Beneficiary ID is required.`);
+    return null;
+  }
+  const b = await pool.query('SELECT id FROM beneficiaries WHERE id=$1', [given]);
+  if (!b.rows.length) {
+    result.skipped++;
+    result.errors.push(`Row ${rowNo}: No beneficiary with ID ${given}.`);
+    return null;
+  }
+  return given;
+}
+
+function parseQty(r, rowNo, result) {
+  const q = pick(r, 'qty', 'quantity');
+  if (!/^\d+(\.0+)?$/.test(q)) {
+    result.skipped++;
+    result.errors.push(`Row ${rowNo}: Qty must be a whole number (0 or more).`);
+    return null;
+  }
+  return Math.trunc(Number(q));
+}
+
+async function importStockUpdate(rows, ctx = {}) {
+  let seq = await nextSeq('STK', 'stock_update');
+  const result = { inserted: 0, updated: 0, skipped: 0, errors: [] };
+  for (const [idx, r] of rows.entries()) {
+    const rowNo = idx + 2;
+    const beneficiaryId = await resolveStockBeneficiary(r, ctx, rowNo, result);
+    if (!beneficiaryId) continue;
+    const qty = parseQty(r, rowNo, result);
+    if (qty === null) continue;
+
+    // The material: by Material ID, else by Category + Name (+ Type).
+    let materialId = pick(r, 'material id');
+    if (materialId) {
+      const m = await pool.query('SELECT id FROM material_master WHERE id=$1', [materialId]);
+      if (!m.rows.length) {
+        result.skipped++;
+        result.errors.push(`Row ${rowNo}: No material with ID ${materialId}.`);
+        continue;
+      }
+    } else {
+      const category = pick(r, 'material category', 'category');
+      const name = pick(r, 'material name', 'name');
+      const type = pick(r, 'material type', 'type');
+      if (!name) {
+        result.skipped++;
+        result.errors.push(`Row ${rowNo}: Material ID (or Material Category and Material Name) is required.`);
+        continue;
+      }
+      const m = await pool.query(
+        `SELECT id FROM material_master
+          WHERE LOWER(name)=LOWER($1) AND ($2 = '' OR LOWER(category)=LOWER($2))
+            AND LOWER(COALESCE(type,''))=LOWER($3)`,
+        [name, category, type]
+      );
+      if (m.rows.length !== 1) {
+        result.skipped++;
+        result.errors.push(
+          m.rows.length === 0
+            ? `Row ${rowNo}: No material matches "${name}". Check the spelling, or use the Material ID.`
+            : `Row ${rowNo}: "${name}" matches more than one material. Add the Material Category / Type, or use the Material ID.`
+        );
+        continue;
+      }
+      materialId = m.rows[0].id;
+    }
+
+    const status = pick(r, 'status') || null;
+    const remarks = pick(r, 'remarks') || null;
+    const existing = await pool.query('SELECT id FROM stock_update WHERE beneficiary_id=$1 AND material_id=$2', [beneficiaryId, materialId]);
+    if (existing.rows.length) {
+      await pool.query('UPDATE stock_update SET qty=$1, status=$2, remarks=$3, last_updated_at=now(), last_updated_by=$4 WHERE id=$5', [
+        qty, status, remarks, ctx.userId || null, existing.rows[0].id,
+      ]);
+      result.updated++;
+    } else {
+      seq += 1;
+      await pool.query(
+        'INSERT INTO stock_update (id, beneficiary_id, material_id, qty, status, remarks, last_updated_by) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [`STK-${String(seq).padStart(4, '0')}`, beneficiaryId, materialId, qty, status, remarks, ctx.userId || null]
+      );
+      result.inserted++;
+    }
+  }
+  return result;
+}
+
+async function importBookUpdate(rows, ctx = {}) {
+  let seq = await nextSeq('BKU', 'book_update');
+  const result = { inserted: 0, updated: 0, skipped: 0, errors: [] };
+  for (const [idx, r] of rows.entries()) {
+    const rowNo = idx + 2;
+    const beneficiaryId = await resolveStockBeneficiary(r, ctx, rowNo, result);
+    if (!beneficiaryId) continue;
+    const qty = parseQty(r, rowNo, result);
+    if (qty === null) continue;
+
+    // The book: by Book ID, else by Title (+ Language).
+    let bookId = pick(r, 'book id');
+    if (bookId) {
+      const b = await pool.query('SELECT id FROM book_master WHERE id=$1', [bookId]);
+      if (!b.rows.length) {
+        result.skipped++;
+        result.errors.push(`Row ${rowNo}: No book with ID ${bookId}.`);
+        continue;
+      }
+    } else {
+      const title = pick(r, 'title', 'book title');
+      const language = pick(r, 'language');
+      if (!title) {
+        result.skipped++;
+        result.errors.push(`Row ${rowNo}: Book ID (or Title) is required.`);
+        continue;
+      }
+      const b = await pool.query(
+        "SELECT id FROM book_master WHERE LOWER(title)=LOWER($1) AND ($2 = '' OR LOWER(COALESCE(language,''))=LOWER($2))",
+        [title, language]
+      );
+      if (b.rows.length !== 1) {
+        result.skipped++;
+        result.errors.push(
+          b.rows.length === 0
+            ? `Row ${rowNo}: No book matches "${title}". Check the spelling, or use the Book ID.`
+            : `Row ${rowNo}: "${title}" matches more than one book. Add the Language, or use the Book ID.`
+        );
+        continue;
+      }
+      bookId = b.rows[0].id;
+    }
+
+    const status = pick(r, 'status') || null;
+    const remarks = pick(r, 'remarks') || null;
+    const existing = await pool.query('SELECT id FROM book_update WHERE beneficiary_id=$1 AND book_id=$2', [beneficiaryId, bookId]);
+    if (existing.rows.length) {
+      await pool.query('UPDATE book_update SET qty=$1, status=$2, remarks=$3, last_updated_at=now(), last_updated_by=$4 WHERE id=$5', [
+        qty, status, remarks, ctx.userId || null, existing.rows[0].id,
+      ]);
+      result.updated++;
+    } else {
+      seq += 1;
+      await pool.query(
+        'INSERT INTO book_update (id, beneficiary_id, book_id, qty, status, remarks, last_updated_by) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [`BKU-${String(seq).padStart(4, '0')}`, beneficiaryId, bookId, qty, status, remarks, ctx.userId || null]
+      );
+      result.inserted++;
+    }
+  }
+  return result;
+}
+
 const IMPORTERS = {
   resources: importResources,
   beneficiaries: importBeneficiaries,
@@ -405,7 +594,12 @@ const IMPORTERS = {
   materialMaster: importMaterialMaster,
   studentMaster: importStudentMaster,
   bookMaster: importBookMaster,
+  stockUpdate: importStockUpdate,
+  bookUpdate: importBookUpdate,
 };
+
+// What a Facilitator may import (own beneficiary only); everything else is admin-only.
+const FACILITATOR_IMPORTS = new Set(['studentMaster', 'stockUpdate', 'bookUpdate']);
 
 router.post('/:table', upload.single('file'), async (req, res, next) => {
   try {
@@ -416,7 +610,25 @@ router.post('/:table', upload.single('file'), async (req, res, next) => {
     const rows = await readRows(req.file.buffer);
     if (rows.length === 0) return res.status(400).json({ error: 'No data rows found in the sheet.' });
 
-    const result = await importer(rows, { userId: req.user?.sub });
+    const ctx = { userId: req.user?.sub };
+    if (req.user?.role !== 'Admin') {
+      // Only the three facilitator lists may be imported by a non-admin, and only
+      // into their own beneficiary.
+      if (!FACILITATOR_IMPORTS.has(req.params.table)) {
+        return res.status(403).json({ error: 'Only an admin can import this.' });
+      }
+      const alloc = await pool.query(
+        `SELECT beneficiary_id FROM beneficiary_resource_allocation
+          WHERE active AND (resource1_id = $1 OR resource2_id = $1) LIMIT 1`,
+        [req.user.sub]
+      );
+      if (!alloc.rows.length) {
+        return res.status(403).json({ error: "You aren't assigned to a beneficiary yet. Ask your admin to allocate you." });
+      }
+      ctx.fixedBeneficiaryId = alloc.rows[0].beneficiary_id;
+    }
+
+    const result = await importer(rows, ctx);
     res.json(result);
   } catch (err) {
     next(err);
