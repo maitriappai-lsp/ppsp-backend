@@ -12,6 +12,10 @@ const { rowToRecord } = require('../caseConvert');
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 
+// The password an Admin's "Reset password" puts back (the same one new
+// accounts start with). The person is made to choose a new one at next sign-in.
+const DEFAULT_PASSWORD = process.env.DEFAULT_PASSWORD || 'changeme123';
+
 function scrubResource(record) {
   const { passwordHash, ...rest } = record;
   return rest;
@@ -105,6 +109,33 @@ router.post('/change-password', async (req, res, next) => {
     );
     if (rows.length === 0) return res.status(404).json({ ok: false, error: 'Resource not found' });
     res.json({ ok: true, user: scrubResource(rowToRecord(rows[0])) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /auth/reset-password { resourceId }  -- ADMIN ONLY
+// For a forgotten password: sets the account back to the default password and
+// flags it so the person must choose a new one the next time they sign in. It
+// also clears any "too many wrong attempts" lock on their phone number, since a
+// forgotten password is usually why they were locked out. (A sign-in they
+// already have stays valid until it expires, up to 12 hours.)
+router.post('/reset-password', async (req, res, next) => {
+  try {
+    const claims = verifyBearer(req);
+    if (!claims) return res.status(401).json({ ok: false, error: 'Sign in required.' });
+    if (claims.role !== 'Admin') return res.status(403).json({ ok: false, error: 'Only an admin can reset a password.' });
+    const { resourceId } = req.body || {};
+    if (!resourceId) return res.status(400).json({ ok: false, error: 'resourceId is required' });
+
+    const passwordHash = await bcrypt.hash(DEFAULT_PASSWORD, 10);
+    const { rows } = await pool.query(
+      'UPDATE resources SET password_hash = $1, must_change_password = TRUE, updated_at = now() WHERE id = $2 RETURNING id, name, phone',
+      [passwordHash, resourceId]
+    );
+    if (rows.length === 0) return res.status(404).json({ ok: false, error: 'Resource not found' });
+    failedAttempts.delete(rows[0].phone);
+    res.json({ ok: true, name: rows[0].name, defaultPassword: DEFAULT_PASSWORD });
   } catch (err) {
     next(err);
   }
