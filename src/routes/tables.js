@@ -64,6 +64,9 @@ const OWN_BENEFICIARY_STAMP = {
   bookUpdate: 'lastUpdatedBy',
 };
 
+// An Audit Facilitator can do everything a Facilitator can, plus audits.
+const isFacilitatorRole = (role) => role === 'Facilitator' || role === 'Audit Facilitator';
+
 async function ownBeneficiaryId(userId) {
   const { rows } = await pool.query(
     `SELECT beneficiary_id FROM beneficiary_resource_allocation
@@ -75,7 +78,7 @@ async function ownBeneficiaryId(userId) {
 
 // Returns an error message if this write isn't allowed, else null.
 async function ownBeneficiaryCheck(req, clientTable, { record, patch, id }) {
-  if (req.user?.role !== 'Facilitator' || !OWN_BENEFICIARY_STAMP[clientTable]) return null;
+  if (!isFacilitatorRole(req.user?.role) || !OWN_BENEFICIARY_STAMP[clientTable]) return null;
   const mine = await ownBeneficiaryId(req.user.sub);
   if (!mine) return "You aren't assigned to a beneficiary yet. Ask your admin to allocate you.";
   const msg = 'You can only change records for your own assigned beneficiary.';
@@ -90,7 +93,7 @@ async function ownBeneficiaryCheck(req, clientTable, { record, patch, id }) {
 
 function stampFacilitator(req, clientTable, obj) {
   const column = OWN_BENEFICIARY_STAMP[clientTable];
-  if (req.user?.role !== 'Facilitator' || !column) return obj;
+  if (!isFacilitatorRole(req.user?.role) || !column) return obj;
   return { ...obj, [column]: req.user.sub };
 }
 
@@ -191,10 +194,11 @@ async function fetchTable(clientTable) {
 }
 
 // A facilitator's DSR must go through POST /api/dsr/save, which enforces
-// "one submit per day, no edits after submit"; and only the Admin may grant
-// the approvals that let a facilitator file for another date. These tables are
+// "one submit per day, no edits after submit"; audits go through
+// POST /api/audit/save; only the Admin may grant the approvals that let a
+// facilitator file for another date, or change the audit checklist. These tables are
 // therefore read-only through the generic routes for everyone except the Admin.
-const ADMIN_WRITE_ONLY = new Set(['dsr', 'dsrDetail', 'dsrOverrides']);
+const ADMIN_WRITE_ONLY = new Set(['dsr', 'dsrDetail', 'dsrOverrides', 'audits', 'auditDetail', 'auditCategories']);
 
 router.param('table', (req, res, next, table) => {
   if (!sqlTable(table)) return res.status(404).json({ error: `Unknown table "${table}"` });

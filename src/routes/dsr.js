@@ -7,7 +7,7 @@
 // never left half-saved.
 //
 // Rules enforced here (not just in the app):
-//   * Only a Facilitator files a DSR, and always as THEMSELVES -- the resource
+//   * Only a Facilitator (or Audit Facilitator) files a DSR, and always as THEMSELVES -- the resource
 //     is taken from the login token, never from the request.
 //   * Only for TODAY (in APP_TIMEZONE, default Asia/Kolkata) -- with two
 //     exceptions. (1) An ADMIN APPROVAL (dsr_override: this facilitator, this
@@ -105,7 +105,7 @@ function ragOrNull(v, label) {
 router.post('/save', async (req, res, next) => {
   const client = await pool.connect();
   try {
-    if (req.user.role !== 'Facilitator') {
+    if (req.user.role !== 'Facilitator' && req.user.role !== 'Audit Facilitator') {
       throw new HttpError(403, 'Only facilitators file a DSR from here. Admins edit DSRs from the dashboard.');
     }
     const me = req.user.sub;

@@ -29,11 +29,6 @@ CREATE TABLE IF NOT EXISTS resources (
 -- routes/auth.js) but its historical attendance/session records stay put.
 ALTER TABLE resources ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
 
--- PPSP: a Facilitator who may also log in as an Audit Facilitator. The audit
--- visit screen is only enabled when this is TRUE and the person chooses to
--- log in as audit facilitator (that choice is handled in the app, not here).
-ALTER TABLE resources ADD COLUMN IF NOT EXISTS is_audit_facilitator BOOLEAN DEFAULT FALSE;
-
 CREATE TABLE IF NOT EXISTS beneficiaries (
   id       TEXT PRIMARY KEY,
   school   TEXT NOT NULL,
@@ -607,3 +602,26 @@ CREATE TABLE IF NOT EXISTS leave_permission (
 );
 
 CREATE INDEX IF NOT EXISTS leave_permission_resource_idx ON leave_permission (resource_id, status);
+
+-- ---------------------------------------------------------------------------
+-- Audit Facilitator is a ROLE on the resource (resources.role = 'Audit
+-- Facilitator'), alongside Facilitator and Admin. It can do everything a
+-- Facilitator can, plus record audit visits.
+--
+-- The first version of this file used a yes/no flag (is_audit_facilitator) on a
+-- Facilitator instead. Anyone flagged becomes an Audit Facilitator, and the flag
+-- goes. A no-op on a fresh database.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'resources' AND column_name = 'is_audit_facilitator') THEN
+    UPDATE resources SET role = 'Audit Facilitator' WHERE is_audit_facilitator IS TRUE AND role = 'Facilitator';
+    ALTER TABLE resources DROP COLUMN is_audit_facilitator;
+  END IF;
+END $$;
+
+-- Who recorded each audit (the Audit Facilitator). Facilitator 1 / 2 on the
+-- audit are the facilitators being visited at that beneficiary, not the auditor.
+ALTER TABLE audit_header ADD COLUMN IF NOT EXISTS auditor_id TEXT REFERENCES resources(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS audit_header_auditor_idx ON audit_header (auditor_id);
