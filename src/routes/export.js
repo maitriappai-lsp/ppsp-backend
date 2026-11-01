@@ -35,6 +35,7 @@ const EXPORTS = {
       LEFT JOIN resources r ON r.id = a.facilitator_id
       LEFT JOIN beneficiaries b ON b.id = a.beneficiary_id
       WHERE a.date >= $1 AND a.date <= $2 AND ($3::text IS NULL OR a.facilitator_id = $3)
+        AND ($4::text[] IS NULL OR a.id = ANY($4::text[]))
       ORDER BY a.date DESC
     `,
   },
@@ -58,6 +59,7 @@ const EXPORTS = {
       LEFT JOIN beneficiaries b ON b.id = u.beneficiary_id
       LEFT JOIN material_master m ON m.id = u.material_id
       WHERE u.date >= $1 AND u.date <= $2 AND ($3::text IS NULL OR u.facilitator_id = $3)
+        AND ($4::text[] IS NULL OR u.id = ANY($4::text[]))
       ORDER BY u.date DESC
     `,
   },
@@ -71,7 +73,9 @@ router.get('/:type', async (req, res, next) => {
     const { from, to, facilitatorId } = req.query;
     if (!from || !to) return res.status(400).json({ error: 'from and to (YYYY-MM-DD) are required' });
 
-    const { rows } = await pool.query(config.query, [from, to, facilitatorId === 'all' ? null : facilitatorId || null]);
+    // Optional ?ids=a,b,c: only those rows (what a screen has filtered down to).
+    const ids = req.query.ids ? String(req.query.ids).split(',').filter(Boolean) : null;
+    const { rows } = await pool.query(config.query, [from, to, facilitatorId === 'all' ? null : facilitatorId || null, ids]);
 
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet(config.sheetName);
