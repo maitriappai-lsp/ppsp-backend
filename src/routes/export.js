@@ -123,6 +123,11 @@ router.get('/table/:table', async (req, res, next) => {
       ({ rows } = await pool.query(`SELECT * FROM ${table} ORDER BY id`));
     }
 
+    // A facilitator can only export their OWN leave and permission requests.
+    if (req.params.table === 'leaveRequests' && req.user?.role !== 'Admin') {
+      rows = rows.filter((r) => r.resource_id === req.user.sub);
+    }
+
     const records = rows.map((r) => {
       const rec = rowToRecord(r);
       if (req.params.table === 'resources') delete rec.passwordHash;
