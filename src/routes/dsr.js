@@ -283,4 +283,145 @@ router.post('/save', async (req, res, next) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/dsr/admin-save -- the ADMIN adds or corrects a DSR for anyone.
+//
+// Unlike a facilitator's save there is no attendance rule and no approval to
+// ask for: the Admin may write a DSR for any resource and beneficiary, on any
+// date up to today, and may correct one that is already Submitted.
+//   * Save as DRAFT is only for TODAY's DSR ("save and submit for only today");
+//     a DSR for an earlier date is saved as Submitted (it is a record, not a
+//     work in progress).
+//   * Submitted still has to be complete (time in, both counts, three RAGs).
+//   * Still one DSR per resource + beneficiary + day, and every line needs at
+//     least one student from that beneficiary.
+// Deleting is the generic DELETE /api/dsr/:id (the lines go with it).
+// ---------------------------------------------------------------------------
+router.post('/admin-save', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    if (req.user.role !== 'Admin') throw new HttpError(403, 'Only an admin can do this.');
+    const { id = null, resourceId, beneficiaryId, date, status = 'Submitted', header = {}, lines = [] } = req.body || {};
+    if (!['Draft', 'Submitted'].includes(status)) throw new HttpError(400, 'Status must be Draft or Submitted.');
+    if (!Array.isArray(lines)) throw new HttpError(400, 'Lines must be a list.');
+    const submit = status === 'Submitted';
+
+    const today = todayInAppTimezone();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) throw new HttpError(400, 'Choose the DSR date.');
+    if (date > today) throw new HttpError(400, "A DSR can't be for a future date.");
+    if (!submit && date !== today) {
+      throw new HttpError(400, 'A DSR can be saved as a draft only for today. For an earlier date, save it as submitted.');
+    }
+
+    const person = await client.query("SELECT id FROM resources WHERE id = $1 AND role IN ('Facilitator', 'Audit Facilitator')", [resourceId]);
+    if (!person.rows.length) throw new HttpError(400, 'Choose the facilitator the DSR is for.');
+    const ben = await client.query('SELECT 1 FROM beneficiaries WHERE id = $1', [beneficiaryId]);
+    if (!ben.rows.length) throw new HttpError(400, 'Choose the beneficiary.');
+
+    const h = {
+      timeIn: textOrNull(header.timeIn),
+      childrenMorning: countOrNull(header.childrenMorning, 'Number of children at 9.30 am'),
+      childrenAfternoon: countOrNull(header.childrenAfternoon, 'Number of active children 12.30 to 2 pm'),
+      stockRag: ragOrNull(header.stockRag, 'Stock RAG rating'),
+      stockRemarks: textOrNull(header.stockRemarks),
+      bookRag: ragOrNull(header.bookRag, 'Book RAG rating'),
+      overallRag: ragOrNull(header.overallRag, 'Overall day RAG rating'),
+      remarks: textOrNull(header.remarks),
+    };
+    const picked = Array.isArray(header.circleTimeActivities) ? [...new Set(header.circleTimeActivities)] : [];
+    picked.forEach((a) => {
+      if (!CIRCLE_TIME.includes(a)) throw new HttpError(400, `"${a}" is not a circle time activity.`);
+    });
+    const epl = Array.isArray(header.eplMaterialsUsed) ? [...new Set(header.eplMaterialsUsed)] : [];
+    if (epl.length) {
+      const ok = await client.query("SELECT id FROM material_master WHERE id = ANY($1::text[]) AND LOWER(TRIM(category)) = 'epl'", [epl]);
+      if (ok.rows.length !== epl.length) throw new HttpError(400, "One of the EPL materials isn't in the EPL category.");
+    }
+    if (submit) {
+      const missing = [];
+      if (!h.timeIn) missing.push('Facilitator time in');
+      if (h.childrenMorning === null) missing.push('Children at 9.30 am');
+      if (h.childrenAfternoon === null) missing.push('Active children 12.30 to 2 pm');
+      if (!h.stockRag) missing.push('Stock RAG rating');
+      if (!h.bookRag) missing.push('Book RAG rating');
+      if (!h.overallRag) missing.push('Overall day RAG rating');
+      if (missing.length) throw new HttpError(400, `Please fill in: ${missing.join(', ')}.`);
+    }
+
+    // ---- lines ----------------------------------------------------------
+    const materialIds = [...new Set(lines.map((l) => l.materialId).filter(Boolean))];
+    const materials = {};
+    if (materialIds.length) {
+      const m = await client.query('SELECT id, activities FROM material_master WHERE id = ANY($1::text[])', [materialIds]);
+      m.rows.forEach((r) => (materials[r.id] = r.activities || []));
+    }
+    const studentIds = [...new Set(lines.flatMap((l) => (Array.isArray(l.studentIds) ? l.studentIds : [])))];
+    if (studentIds.length) {
+      const s = await client.query('SELECT id FROM student_master WHERE id = ANY($1::text[]) AND beneficiary_id = $2', [studentIds, beneficiaryId]);
+      if (s.rows.length !== studentIds.length) throw new HttpError(400, "One of the students isn't on the chosen beneficiary's student list.");
+    }
+    const cleanLines = lines.map((l, i) => {
+      const n = i + 1;
+      if (!l.materialId || !materials[l.materialId]) throw new HttpError(400, `Line ${n}: choose a material.`);
+      if (!['M', 'A'].includes(l.sessionPeriod)) throw new HttpError(400, `Line ${n}: choose Morning or Afternoon.`);
+      if (!Array.isArray(l.studentIds) || l.studentIds.length === 0) throw new HttpError(400, `Line ${n}: choose at least one student.`);
+      const activity = textOrNull(l.materialActivity);
+      if (activity && !materials[l.materialId].includes(activity)) throw new HttpError(400, `Line ${n}: "${activity}" isn't one of that material's activities.`);
+      return { materialId: l.materialId, activity, period: l.sessionPeriod, studentIds: [...new Set(l.studentIds)] };
+    });
+
+    // ---- write ------------------------------------------------------------
+    await client.query('BEGIN');
+    let dsrId = id;
+    let previousStatus = null;
+    if (dsrId) {
+      const cur = await client.query('SELECT id, status FROM dsr_header WHERE id = $1 FOR UPDATE', [dsrId]);
+      if (!cur.rows.length) throw new HttpError(404, 'That DSR was not found.');
+      previousStatus = cur.rows[0].status;
+    } else {
+      const clash = await client.query('SELECT id FROM dsr_header WHERE resource_id = $1 AND dsr_date = $2 AND beneficiary_id = $3', [resourceId, date, beneficiaryId]);
+      if (clash.rows.length) throw new HttpError(409, 'A DSR already exists for that resource, beneficiary and date. Edit that one instead.');
+      dsrId = `DSR-${date.replace(/-/g, '')}-${resourceId}-${beneficiaryId}`;
+    }
+    const values = [resourceId, beneficiaryId, date, h.timeIn, h.childrenMorning, h.childrenAfternoon, h.stockRag, h.stockRemarks, h.bookRag, h.overallRag, picked, epl, h.remarks, status];
+    if (id) {
+      await client.query(
+        `UPDATE dsr_header SET resource_id=$1, beneficiary_id=$2, dsr_date=$3, time_in=$4, children_morning=$5, children_afternoon=$6,
+           stock_rag=$7, stock_remarks=$8, book_rag=$9, overall_rag=$10, circle_time_activities=$11, epl_materials_used=$12,
+           remarks=$13, status=$14,
+           submitted_at = CASE WHEN $14 = 'Submitted' THEN COALESCE(submitted_at, now()) ELSE NULL END,
+           updated_at = now()
+         WHERE id=$15`,
+        [...values, dsrId]
+      );
+      await client.query('DELETE FROM dsr_detail WHERE dsr_id = $1', [dsrId]);
+    } else {
+      await client.query(
+        `INSERT INTO dsr_header (resource_id, beneficiary_id, dsr_date, time_in, children_morning, children_afternoon, stock_rag, stock_remarks,
+           book_rag, overall_rag, circle_time_activities, epl_materials_used, remarks, status, submitted_at, id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, CASE WHEN $14 = 'Submitted' THEN now() ELSE NULL END, $15)`,
+        [...values, dsrId]
+      );
+    }
+    for (const [i, l] of cleanLines.entries()) {
+      const lineId = `${dsrId}-L${i + 1}`;
+      await client.query('INSERT INTO dsr_detail (id, dsr_id, material_id, material_activity, session_period) VALUES ($1,$2,$3,$4,$5)', [lineId, dsrId, l.materialId, l.activity, l.period]);
+      for (const studentId of l.studentIds) {
+        await client.query('INSERT INTO dsr_detail_students (dsr_detail_id, student_id) VALUES ($1,$2)', [lineId, studentId]);
+      }
+    }
+    const saved = await client.query('SELECT * FROM dsr_header WHERE id = $1', [dsrId]);
+    await client.query('COMMIT');
+    res.json({ dsr: rowToRecord(saved.rows[0]), previousStatus });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+    if (err.code === '23505') return res.status(409).json({ error: 'A DSR already exists for that resource, beneficiary and date.' });
+    if (err.code === '23514') return res.status(400).json({ error: 'A submitted DSR needs time in, both child counts and all three RAG ratings.' });
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
 module.exports = router;

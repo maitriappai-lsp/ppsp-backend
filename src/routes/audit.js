@@ -15,6 +15,7 @@
 //     audits from the admin side.
 //   * The visit number (1, 2, 3 ... per beneficiary) is assigned by the
 //     database when the audit is first saved, so it can't be chosen or clash.
+//   * An auditor can't be Facilitator 1 or 2 on their own audit (no auditing yourself).
 //   * The beneficiary must exist, the date can't be in the future, the end time
 //     must be after the start time, Facilitator 2 must differ from Facilitator
 //     1, and every answered question must be an active checklist question.
@@ -47,16 +48,12 @@ function textOrNull(v) {
   return s ? s : null;
 }
 
-router.post('/save', async (req, res, next) => {
-  const client = await pool.connect();
-  try {
-    if (req.user.role !== 'Audit Facilitator') {
-      throw new HttpError(403, 'Only an audit facilitator can record an audit visit.');
-    }
-    const me = req.user.sub;
-    const { id = null, submit = false, header = {}, details = [] } = req.body || {};
-    if (!Array.isArray(details)) throw new HttpError(400, 'Details must be a list.');
 
+// Checks an audit's header and answers; returns the cleaned values or throws an
+// HttpError. `forbidSelf`: the auditor can't be Facilitator 1 or 2 on their own
+// audit (the audit facilitator's route). `allowInactive`: let retired checklist
+// questions be answered (the admin correcting an old audit).
+async function validateAudit(client, { header, details, submit, me, forbidSelf, allowInactive }) {
     // ---- header ----------------------------------------------------------
     const h = {
       auditDate: textOrNull(header.auditDate),
@@ -89,6 +86,7 @@ router.post('/save', async (req, res, next) => {
     const ben = await client.query('SELECT 1 FROM beneficiaries WHERE id = $1', [h.beneficiaryId]);
     if (!ben.rows.length) throw new HttpError(400, "That beneficiary doesn't exist.");
     const facIds = [h.facilitator1Id, h.facilitator2Id].filter(Boolean);
+    if (forbidSelf && facIds.includes(me)) throw new HttpError(400, "You can't audit yourself. Choose the other facilitator(s).");
     if (facIds.length) {
       const f = await client.query(
         "SELECT id FROM resources WHERE id = ANY($1::text[]) AND role IN ('Facilitator', 'Audit Facilitator')",
@@ -115,7 +113,7 @@ router.post('/save', async (req, res, next) => {
     }
     if (answers.size) {
       const ok = await client.query(
-        'SELECT id FROM audit_category_master WHERE id = ANY($1::text[]) AND NOT is_heading AND active',
+        `SELECT id FROM audit_category_master WHERE id = ANY($1::text[]) AND NOT is_heading ${allowInactive ? '' : 'AND active'}`,
         [[...answers.keys()]]
       );
       if (ok.rows.length !== answers.size) {
@@ -124,6 +122,21 @@ router.post('/save', async (req, res, next) => {
         throw new HttpError(400, `${bad} isn't an active checklist question.`);
       }
     }
+
+    return { h, answers };
+}
+
+router.post('/save', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    if (req.user.role !== 'Audit Facilitator') {
+      throw new HttpError(403, 'Only an audit facilitator can record an audit visit.');
+    }
+    const me = req.user.sub;
+    const { id = null, submit = false, header = {}, details = [] } = req.body || {};
+    if (!Array.isArray(details)) throw new HttpError(400, 'Details must be a list.');
+
+    const { h, answers } = await validateAudit(client, { header, details, submit, me, forbidSelf: true, allowInactive: false });
 
     // ---- write -------------------------------------------------------------
     await client.query('BEGIN');
@@ -164,6 +177,75 @@ router.post('/save', async (req, res, next) => {
         'INSERT INTO audit_detail (id, audit_id, category_no, status_flag, rating, remarks) VALUES ($1,$2,$3,$4,$5,$6)',
         [`${auditId}-${a.categoryNo}`, auditId, a.categoryNo, a.statusFlag, a.rating, a.remarks]
       );
+    }
+    const saved = await client.query('SELECT * FROM audit_header WHERE id = $1', [auditId]);
+    await client.query('COMMIT');
+    res.json({ audit: rowToRecord(saved.rows[0]) });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+    if (err.code === '23505') return res.status(409).json({ error: 'That audit clashed with another save. Please try again.' });
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/audit/admin-save -- the ADMIN adds or corrects an audit for anyone.
+// The admin may write an audit on behalf of an audit facilitator, change one
+// that is already Submitted, and move it between Draft and Submitted. Same
+// checks on the contents as above, except the "no auditing yourself" rule.
+// Deleting is the generic DELETE /api/audits/:id (the answers go with it).
+// ---------------------------------------------------------------------------
+router.post('/admin-save', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    if (req.user.role !== 'Admin') throw new HttpError(403, 'Only an admin can do this.');
+    const { id = null, auditorId = null, status = 'Submitted', header = {}, details = [] } = req.body || {};
+    if (!['Draft', 'Submitted'].includes(status)) throw new HttpError(400, 'Status must be Draft or Submitted.');
+    if (!Array.isArray(details)) throw new HttpError(400, 'Details must be a list.');
+    const submit = status === 'Submitted';
+    const { h, answers } = await validateAudit(client, { header, details, submit, me: req.user.sub, forbidSelf: false, allowInactive: true });
+
+    const recorder = textOrNull(auditorId);
+    if (recorder) {
+      const r = await client.query('SELECT 1 FROM resources WHERE id = $1', [recorder]);
+      if (!r.rows.length) throw new HttpError(400, "The 'recorded by' person doesn't exist.");
+    }
+
+    await client.query('BEGIN');
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('audit_header_write'))");
+    let auditId = id;
+    if (auditId) {
+      const cur = await client.query('SELECT id FROM audit_header WHERE id = $1 FOR UPDATE', [auditId]);
+      if (!cur.rows.length) throw new HttpError(404, 'That audit was not found.');
+      await client.query(
+        `UPDATE audit_header SET audit_date=$1, time_from=$2, time_to=$3, beneficiary_id=$4,
+           facilitator1_id=$5, facilitator2_id=$6, visit_remarks=$7, status=$8,
+           submitted_at = CASE WHEN $8 = 'Submitted' THEN COALESCE(submitted_at, now()) ELSE NULL END,
+           auditor_id = COALESCE($9, auditor_id), updated_at=now(),
+           visit_number = CASE WHEN beneficiary_id IS DISTINCT FROM $4
+             THEN (SELECT COALESCE(MAX(visit_number), 0) + 1 FROM audit_header WHERE beneficiary_id = $4)
+             ELSE visit_number END
+         WHERE id=$10`,
+        [h.auditDate, h.timeFrom, h.timeTo, h.beneficiaryId, h.facilitator1Id, h.facilitator2Id, h.visitRemarks, status, recorder, auditId]
+      );
+      await client.query('DELETE FROM audit_detail WHERE audit_id = $1', [auditId]);
+    } else {
+      const next = await client.query("SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 5) AS INTEGER)), 0) + 1 AS n FROM audit_header WHERE id ~ '^AUD-[0-9]+$'");
+      auditId = `AUD-${String(next.rows[0].n).padStart(4, '0')}`;
+      await client.query(
+        `INSERT INTO audit_header (id, audit_date, time_from, time_to, beneficiary_id, facilitator1_id,
+           facilitator2_id, visit_remarks, status, submitted_at, auditor_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, CASE WHEN $9 = 'Submitted' THEN now() ELSE NULL END, $10)`,
+        [auditId, h.auditDate, h.timeFrom, h.timeTo, h.beneficiaryId, h.facilitator1Id, h.facilitator2Id, h.visitRemarks, status, recorder || req.user.sub]
+      );
+    }
+    for (const a of answers.values()) {
+      await client.query('INSERT INTO audit_detail (id, audit_id, category_no, status_flag, rating, remarks) VALUES ($1,$2,$3,$4,$5,$6)', [
+        `${auditId}-${a.categoryNo}`, auditId, a.categoryNo, a.statusFlag, a.rating, a.remarks,
+      ]);
     }
     const saved = await client.query('SELECT * FROM audit_header WHERE id = $1', [auditId]);
     await client.query('COMMIT');
