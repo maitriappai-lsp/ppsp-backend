@@ -27,6 +27,7 @@ router.post('/', async (req, res, next) => {
     const productValidityEnd = body.productValidityEnd || null;
     const loginByEmail = body.loginByEmail;
     const gpsOnBeneficiary = body.gpsOnBeneficiary;
+    const faceRecognitionEnabled = body.faceRecognitionEnabled;
     const allowedUploadTypes = body.allowedUploadTypes;
 
     if (!productType) return res.status(400).json({ error: 'Product type is required.' });
@@ -37,8 +38,8 @@ router.post('/', async (req, res, next) => {
     if (!validDate(productValidityEnd)) {
       return res.status(400).json({ error: 'Product validity end date must use YYYY-MM-DD format.' });
     }
-    if (typeof loginByEmail !== 'boolean' || typeof gpsOnBeneficiary !== 'boolean') {
-      return res.status(400).json({ error: 'Login and GPS settings must be true or false.' });
+    if (typeof loginByEmail !== 'boolean' || typeof gpsOnBeneficiary !== 'boolean' || typeof faceRecognitionEnabled !== 'boolean') {
+      return res.status(400).json({ error: 'Login, GPS and face recognition settings must be true or false.' });
     }
     if (
       !Array.isArray(allowedUploadTypes) ||
@@ -50,8 +51,8 @@ router.post('/', async (req, res, next) => {
     const { rows } = await pool.query(
       `INSERT INTO system_parameters
          (id, product_type, org_name, max_named_users, product_validity_end,
-          login_by_email, gps_on_beneficiary, allowed_upload_types)
-       VALUES (TRUE, $1, $2, $3, $4, $5, $6, $7::jsonb)
+          login_by_email, gps_on_beneficiary, face_recognition_enabled, allowed_upload_types)
+       VALUES (TRUE, $1, $2, $3, $4, $5, $6, $7, $8::jsonb)
        ON CONFLICT (id) DO UPDATE SET
          product_type = EXCLUDED.product_type,
          org_name = EXCLUDED.org_name,
@@ -59,6 +60,7 @@ router.post('/', async (req, res, next) => {
          product_validity_end = EXCLUDED.product_validity_end,
          login_by_email = EXCLUDED.login_by_email,
          gps_on_beneficiary = EXCLUDED.gps_on_beneficiary,
+         face_recognition_enabled = EXCLUDED.face_recognition_enabled,
          allowed_upload_types = EXCLUDED.allowed_upload_types
        RETURNING *`,
       [
@@ -68,6 +70,7 @@ router.post('/', async (req, res, next) => {
         productValidityEnd,
         loginByEmail,
         gpsOnBeneficiary,
+        faceRecognitionEnabled,
         JSON.stringify(allowedUploadTypes),
       ]
     );

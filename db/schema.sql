@@ -169,8 +169,14 @@ CREATE TABLE IF NOT EXISTS system_parameters (
   product_validity_end   DATE,
   login_by_email         BOOLEAN DEFAULT FALSE,
   gps_on_beneficiary     BOOLEAN DEFAULT TRUE,
+  face_recognition_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   allowed_upload_types   JSONB DEFAULT '["photo","pdf","ppt"]'
 );
+
+-- Keep this schema re-runnable and add the setting to databases that already
+-- have system_parameters from an earlier version.
+ALTER TABLE system_parameters
+  ADD COLUMN IF NOT EXISTS face_recognition_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
 -- Admin time-in/time-out corrections (Override screen). Kept on the
 -- attendance row itself -- not just the separate `overrides` bypass log --
