@@ -13,6 +13,7 @@ const importRouter = require('./routes/import');
 const attendanceOpenRouter = require('./routes/attendanceOpen');
 const dsrRouter = require('./routes/dsr');
 const auditRouter = require('./routes/audit');
+const systemParametersRouter = require('./routes/systemParameters');
 const { rowToRecord } = require('./caseConvert');
 
 const app = express();
@@ -69,6 +70,7 @@ app.use('/api/files', filesRouter);
 app.use('/api/export', exportRouter);
 app.use('/api/import', importRouter);
 app.use('/api/attendance-open', attendanceOpenRouter);
+app.use('/api/system-parameters', systemParametersRouter);
 app.use('/api/audit', auditRouter); // audit visit save/submit (Audit Facilitator)
 app.use('/api/dsr', dsrRouter); // facilitator DSR save/submit (must come before the generic table routes)
 app.use('/api', tablesRouter);
